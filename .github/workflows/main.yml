@@ -40,13 +40,15 @@ jobs:
             unzip
       - name: Install Dependencies
         run: |
-          curl.exe -L --max-time 60 -o fpc-installer.exe "https://sourceforge.net/projects/freepascal/files/Win32/3.2.2/fpc-3.2.2.win32.and.win64.exe/download"
-          curl.exe -L --max-time 60 -o nsis-3.05-setup.exe "https://sourceforge.net/projects/nsis/files/NSIS%203/3.05/nsis-3.05-setup.exe/download"
+          curl.exe --fail -L --retry 3 --max-time 300 -o fpc-installer.exe "https://sourceforge.net/projects/freepascal/files/Win32/3.2.2/fpc-3.2.2.win32.and.win64.exe/download"
+          if ($LASTEXITCODE -ne 0) { throw "FPC installer download failed (curl exit $LASTEXITCODE)" }
+          curl.exe --fail -L --retry 3 --max-time 300 -o nsis-3.05-setup.exe "https://sourceforge.net/projects/nsis/files/NSIS%203/3.05/nsis-3.05-setup.exe/download"
+          if ($LASTEXITCODE -ne 0) { throw "NSIS installer download failed (curl exit $LASTEXITCODE)" }
           Start-Process -FilePath ".\\fpc-installer.exe" -ArgumentList "/TYPE=full /VERYSILENT /SP- /SUPPRESSMSGBOXES /NORESTART" -Wait
           ./nsis-3.05-setup.exe /S
       - name: Cache DLLs
         id: cache-dlls
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: dists/windows/prefix
           key: windows-dlls-${{ hashFiles('dists/windows/tasks.sh') }}
@@ -54,6 +56,12 @@ jobs:
         if: steps.cache-dlls.outputs.cache-hit != 'true'
         shell: msys2 {0}
         run: make -C dists/windows
+      - name: Save DLL cache
+        if: steps.cache-dlls.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: dists/windows/prefix
+          key: windows-dlls-${{ hashFiles('dists/windows/tasks.sh') }}
       - name: Install DLLs
         shell: msys2 {0}
         run: |
@@ -69,6 +77,38 @@ jobs:
           ./autogen.sh
           ./configure --with-opencv --with-libprojectM
           make
+      - name: Check packaged DLL dependencies
+        working-directory: game
+        run: |
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class PackagedDllCheck {
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            public static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
+            [DllImport("kernel32.dll")]
+            public static extern bool FreeLibrary(IntPtr module);
+          }
+          '@
+          $originalPath = $env:PATH
+          $failed = $false
+          try {
+            # Do not let development tools supply DLLs missing from the package.
+            $env:PATH = ''
+            Get-ChildItem -File -Filter '*.dll' | ForEach-Object {
+              $module = [PackagedDllCheck]::LoadLibraryExW($_.FullName, [IntPtr]::Zero, 8)
+              if ($module -eq [IntPtr]::Zero) {
+                $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                Write-Host "::error::Cannot load $($_.Name): Windows error $errorCode"
+                $failed = $true
+              } else {
+                [void][PackagedDllCheck]::FreeLibrary($module)
+              }
+            }
+          } finally {
+            $env:PATH = $originalPath
+          }
+          if ($failed) { throw 'Packaged DLL dependency check failed.' }
       - name: Create installer
         run: |
           del game\*.debug
@@ -86,6 +126,36 @@ jobs:
         with:
           name: UltraStarDeluxe-windows-portable-${{ env.versionName }}
           path: game
+          if-no-files-found: error
+      - name: Compile optional libmpv backend
+        shell: msys2 {0}
+        run: |
+          export PATH="$PATH:/c/FPC/$FPC_VERSION/bin/i386-win32"
+          export FPCCFG="/c/FPC/$FPC_VERSION/bin/i386-win32/fpc.cfg"
+          export FPCDIR="/c/FPC/$FPC_VERSION"
+          export FPCMAKE="/c/FPC/$FPC_VERSION/bin/i386-win32/fpcmake"
+          ./configure --with-opencv --with-libprojectM --with-mpv=nocheck
+          make
+      - name: Upload optional libmpv executable
+        uses: actions/upload-artifact@v6
+        with:
+          name: UltraStarDeluxe-windows-mpv-executable-${{ env.versionName }}
+          path: game/ultrastardx.exe
+          if-no-files-found: error
+      - name: Compile native video smoke test
+        shell: msys2 {0}
+        run: |
+          export PATH="$PATH:/c/FPC/$FPC_VERSION/bin/i386-win32"
+          export FPCCFG="/c/FPC/$FPC_VERSION/bin/i386-win32/fpc.cfg"
+          export FPCDIR="/c/FPC/$FPC_VERSION"
+          export FPCMAKE="/c/FPC/$FPC_VERSION/bin/i386-win32/fpcmake"
+          pacman -S --needed --noconfirm python
+          python3 test/run-video-smoke.py --build-only --output-dir build/video-smoke
+      - name: Upload native video smoke test
+        uses: actions/upload-artifact@v6
+        with:
+          name: UltraStarDeluxe-windows-video-smoke-${{ env.versionName }}
+          path: build/video-smoke/VideoSmoke.exe
           if-no-files-found: error
 
   build_mac:
@@ -157,6 +227,12 @@ jobs:
           name: UltraStarDeluxe-mac-${{ env.arch }}-${{ env.versionName }}
           path: UltraStarDeluxe-mac-${{ env.arch }}-${{ env.versionName }}.dmg
           if-no-files-found: error
+      - name: Compile optional libmpv backend
+        run: |
+          libprojectM_VERSION=$PROJECTM_VERSION \
+          LIBS=-L$GITHUB_WORKSPACE/projectm/lib \
+          ./configure --with-opencv-cxx-api --with-libprojectM=nocheck --with-mpv=nocheck
+          make
 
   build_linux:
     name: Build for Linux

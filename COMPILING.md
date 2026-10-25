@@ -20,6 +20,9 @@ Required libraries:
 - Archlinux: see the dependencies in the [ultrastardx-git](https://aur.archlinux.org/packages/ultrastardx-git) AUR package
 
 Optional libraries:
+- Hardware-assisted video: libmpv development files (`libmpv-dev` on Debian/Ubuntu).
+  Configure with `--with-mpv`, then enable the backend as described in
+  [hardware video playback](doc/hardware-video.md).
 - [ProjectM](https://github.com/projectM-visualizer/projectm) visualization: You may need to compile this from source because 4.0 or later is required, but many distros still ship 2.x or 3.x
 - Webcam: `g++ libopencv-dev` (Debian/Ubuntu)
 
@@ -47,6 +50,10 @@ Optional libraries:
 - `./game/ultrastardx[.exe]` (on MacOS: `open "UltraStar Deluxe.app"`)
 
 #### configure flags
+* `--with-mpv`: Build the optional libmpv video backend. The default is disabled.
+  FFmpeg remains the default runtime backend. `--with-mpv=nocheck` builds the
+  runtime loader without requiring libmpv's pkg-config file; a compatible
+  library must still be present to use the backend.
 * `--enable-debug`: Outputs warnings and errors from Error.log also to the console, and prints stacktraces when an EAccessViolation occurs.
 * `--with-portaudio`: This is the default.
 * `--without-portaudio`: Use SDL audio input instead.
