@@ -67,8 +67,12 @@ def main():
     def compiler_path(path):
         # The MSYS Python interpreter returns POSIX paths; native FPC needs
         # drive paths inside Pascal source as well as in compiler arguments.
-        if windows and os.name != "nt":
-            return subprocess.check_output(["cygpath", "-m", str(path)], text=True).strip()
+        if windows:
+            if os.name != "nt":
+                return subprocess.check_output(["cygpath", "-w", str(path)], text=True).strip()
+            # MSYS rewrites prefixed forward-slash drive paths such as
+            # -FUD:/a/build. Backslashes inside quoted arguments avoid that.
+            return str(path)
         return path.as_posix()
 
     if args.output_dir:
@@ -114,7 +118,7 @@ def main():
         recipe = "video-smoke-build:; $(PPC) $(PFLAGS_ALL) " + extra
         subprocess.run([
             "make", "--no-print-directory", "-s", "-C", str(src),
-            "PCUNIT_DIR=" + compiler_path(compile_dir),
+            "PCUNIT_FLAGS=",
             "--eval=.PHONY: video-smoke-build", "--eval=" + recipe, "video-smoke-build"
         ], check=True)
         shutil.copy2(compiled_executable, executable)
