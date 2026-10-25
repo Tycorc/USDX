@@ -87,6 +87,29 @@ jobs:
           name: UltraStarDeluxe-windows-portable-${{ env.versionName }}
           path: game
           if-no-files-found: error
+      - name: Compile optional libmpv backend
+        shell: msys2 {0}
+        run: |
+          export PATH="$PATH:/c/FPC/$FPC_VERSION/bin/i386-win32"
+          export FPCCFG="/c/FPC/$FPC_VERSION/bin/i386-win32/fpc.cfg"
+          export FPCDIR="/c/FPC/$FPC_VERSION"
+          export FPCMAKE="/c/FPC/$FPC_VERSION/bin/i386-win32/fpcmake"
+          ./configure --with-opencv --with-libprojectM --with-mpv=nocheck
+          make
+          pacman -S --needed --noconfirm python
+          python3 test/run-video-smoke.py --build-only --output-dir build/video-smoke
+      - name: Upload optional libmpv executable
+        uses: actions/upload-artifact@v6
+        with:
+          name: UltraStarDeluxe-windows-mpv-executable-${{ env.versionName }}
+          path: game/ultrastardx.exe
+          if-no-files-found: error
+      - name: Upload native video smoke test
+        uses: actions/upload-artifact@v6
+        with:
+          name: UltraStarDeluxe-windows-video-smoke-${{ env.versionName }}
+          path: build/video-smoke/VideoSmoke.exe
+          if-no-files-found: error
 
   build_mac:
     name: Build for MacOS (${{ matrix.os }})
@@ -157,6 +180,12 @@ jobs:
           name: UltraStarDeluxe-mac-${{ env.arch }}-${{ env.versionName }}
           path: UltraStarDeluxe-mac-${{ env.arch }}-${{ env.versionName }}.dmg
           if-no-files-found: error
+      - name: Compile optional libmpv backend
+        run: |
+          libprojectM_VERSION=$PROJECTM_VERSION \
+          LIBS=-L$GITHUB_WORKSPACE/projectm/lib \
+          ./configure --with-opencv-cxx-api --with-libprojectM=nocheck --with-mpv=nocheck
+          make
 
   build_linux:
     name: Build for Linux

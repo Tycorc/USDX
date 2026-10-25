@@ -36,6 +36,9 @@ Currently, the following installation channels are offered:
 - If installed via the flatpak package, the primary song folder is `~/.var/app/eu.usdx.UltraStarDeluxe/.ultrastardx/songs/` and the config.ini is located in `~/.var/app/eu.usdx.UltraStarDeluxe/.ultrastardx/` by default. To configure additional song directories, they first need to be made accessible to the flatpak app using the command: `flatpak override eu.usdx.UltraStarDeluxe --filesystem=/your/new/songfolder` - Afterwards, the directory can be added to the config.ini file as usual.
 
 ### 4. Further documentation
+Optional [hardware-assisted video playback](doc/hardware-video.md) is available
+in builds configured with libmpv support.
+
 The [documentation](https://usdx.eu/docs/) contains more information on:
 * [Command-line parameters](https://usdx.eu/docs/command-line-parameters/)
 * [Controls](https://usdx.eu/docs/controls/)
