@@ -40,8 +40,10 @@ jobs:
             unzip
       - name: Install Dependencies
         run: |
-          curl.exe -L --max-time 60 -o fpc-installer.exe "https://sourceforge.net/projects/freepascal/files/Win32/3.2.2/fpc-3.2.2.win32.and.win64.exe/download"
-          curl.exe -L --max-time 60 -o nsis-3.05-setup.exe "https://sourceforge.net/projects/nsis/files/NSIS%203/3.05/nsis-3.05-setup.exe/download"
+          curl.exe --fail -L --retry 3 --max-time 300 -o fpc-installer.exe "https://sourceforge.net/projects/freepascal/files/Win32/3.2.2/fpc-3.2.2.win32.and.win64.exe/download"
+          if ($LASTEXITCODE -ne 0) { throw "FPC installer download failed (curl exit $LASTEXITCODE)" }
+          curl.exe --fail -L --retry 3 --max-time 300 -o nsis-3.05-setup.exe "https://sourceforge.net/projects/nsis/files/NSIS%203/3.05/nsis-3.05-setup.exe/download"
+          if ($LASTEXITCODE -ne 0) { throw "NSIS installer download failed (curl exit $LASTEXITCODE)" }
           Start-Process -FilePath ".\\fpc-installer.exe" -ArgumentList "/TYPE=full /VERYSILENT /SP- /SUPPRESSMSGBOXES /NORESTART" -Wait
           ./nsis-3.05-setup.exe /S
       - name: Cache DLLs
