@@ -250,6 +250,7 @@ uses
   //------------------------------
 
   UMusic                    in 'base\UMusic.pas',
+  UVideoPresenter           in 'media\UVideoPresenter.pas',
   UAudioPlaybackBase        in 'media\UAudioPlaybackBase.pas',
 {$IF Defined(UsePortaudioPlayback) or Defined(UseSDLPlayback)}
   UFFT                      in 'lib\fft\UFFT.pas',
