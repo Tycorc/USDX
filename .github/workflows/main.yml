@@ -75,6 +75,38 @@ jobs:
           ./autogen.sh
           ./configure --with-opencv --with-libprojectM
           make
+      - name: Check packaged DLL dependencies
+        working-directory: game
+        run: |
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class PackagedDllCheck {
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            public static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
+            [DllImport("kernel32.dll")]
+            public static extern bool FreeLibrary(IntPtr module);
+          }
+          '@
+          $originalPath = $env:PATH
+          $failed = $false
+          try {
+            # Do not let development tools supply DLLs missing from the package.
+            $env:PATH = ''
+            Get-ChildItem -File -Filter '*.dll' | ForEach-Object {
+              $module = [PackagedDllCheck]::LoadLibraryExW($_.FullName, [IntPtr]::Zero, 8)
+              if ($module -eq [IntPtr]::Zero) {
+                $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                Write-Host "::error::Cannot load $($_.Name): Windows error $errorCode"
+                $failed = $true
+              } else {
+                [void][PackagedDllCheck]::FreeLibrary($module)
+              }
+            }
+          } finally {
+            $env:PATH = $originalPath
+          }
+          if ($failed) { throw 'Packaged DLL dependency check failed.' }
       - name: Create installer
         run: |
           del game\*.debug

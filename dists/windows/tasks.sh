@@ -441,7 +441,7 @@ add_dll() {
 
 task_install() {
 	rm -f $DLL_DIR/*.debug $DLL_DIR/*.dll
-	for i in $ffmpeg_DLLs $david_DLLs $libjpeg_turbo_DLLs $libpng_DLLs $libtiff_DLLs $libwebp_DLLs $SDL2_DLLs $SDL2_image_DLLs $lua_DLLs $sqlite_DLLs $freetype_DLLs $projectm_DLLs $opencv_DLLs; do
+	for i in $ffmpeg_DLLs $dav1d_DLLs $libjpeg_turbo_DLLs $libpng_DLLs $libtiff_DLLs $libwebp_DLLs $SDL2_DLLs $SDL2_image_DLLs $lua_DLLs $sqlite_DLLs $freetype_DLLs $projectm_DLLs $opencv_DLLs; do
 		add_dll "$i"
 	done
 	for i in $PREFIX/bin/bass.dll $PREFIX/bin/msys2/*.dll; do
