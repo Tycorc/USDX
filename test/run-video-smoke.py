@@ -72,7 +72,7 @@ def main():
                 return subprocess.check_output(["cygpath", "-w", str(path)], text=True).strip()
             # MSYS rewrites prefixed forward-slash drive paths such as
             # -FUD:/a/build. Backslashes inside quoted arguments avoid that.
-            return str(path)
+            return str(path).replace("/", "\\")
         return path.as_posix()
 
     if args.output_dir:
