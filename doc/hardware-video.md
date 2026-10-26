@@ -123,3 +123,36 @@ software, and MPV automatic decoding with the same song and settings.
 
 WSL software-rendered playback is useful for lifecycle and fallback checks, but
 does not establish native Windows or Linux hardware-decoding support.
+
+## Benchmark
+
+`test/video-benchmark/Benchmark-USDX.ps1` measures the playback cost of one song
+on Windows. For each song folder and mode (`ffmpeg`, `mpv-no`, `mpv-auto`) it
+starts the game with a fresh 1280x720 windowed config capped at 60 fps, sings the
+song through the menus by posting key presses, and samples the game's CPU time,
+GPU 3D and video-decode engine load and memory over `-Seconds` (default 60) of
+the song. It reads the decoder that played the video from the log and marks a
+run invalid when the song did not start within 30 s of the window, ended inside
+it, or MPV fell back to FFmpeg. Results go to `results\<machine>-<time>` beside
+the script: `results.csv`, `system.json` (CPU, GPUs, drivers, battery) and each
+run's logs.
+
+Put the game in `game` beside the script or pass `-GameDirectory`. Each folder
+under `songs` (or `-SongRoot`) holds the same song with a different `video.mp4`,
+so results are comparable across machines only with identical files. Variants
+from one source clip, looped to the song length (193.24 s here):
+
+```sh
+ff() { ffmpeg -y -stream_loop -1 -i source.mp4 -t 193.24 -an -map_metadata -1 -pix_fmt yuv420p -g 50 "$@"; }
+ff -vf scale=1280:720 -c:v libx264 -b:v 3M -maxrate 4M -bufsize 6M 720p-h264.mp4
+ff -vf scale=1920:1080 -c:v libx264 -b:v 6M -maxrate 8M -bufsize 12M 1080p-h264.mp4
+ff -vf scale=1920:1080 -c:v libvpx-vp9 -b:v 4M -deadline good -cpu-used 4 -row-mt 1 1080p-vp9.mp4
+ff -vf scale=1920:1080 -c:v libsvtav1 -preset 8 -b:v 3M 1080p-av1.mp4
+ff -c:v libx264 -b:v 16M -maxrate 20M -bufsize 32M 2160p-h264.mp4
+```
+
+Run `Run benchmark.cmd`, or the script with `-Videos 1080p-h264,1080p-av1
+-Modes ffmpeg,mpv-auto` for a subset. The game window opens without taking
+focus. Without an assigned microphone the game shows a notice that the last key
+press closes; pitch detection then does not run, so absolute CPU is lower than
+in a real singing session while the comparison between modes holds.
