@@ -44,3 +44,11 @@ jobs:
         run: |
           xvfb-run -a -s '-screen 0 1280x720x24' \
             python3 test/run-video-smoke.py --renderers gl gl2 gles2 gles3
+      - name: Test hardware decoder selection
+        if: matrix.mpv == 'with'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          SDL_VIDEODRIVER: x11
+        run: |
+          xvfb-run -a -s '-screen 0 1280x720x24' \
+            python3 test/run-video-smoke.py --renderers gl --hwdec auto
