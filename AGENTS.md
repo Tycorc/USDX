@@ -1,18 +1,20 @@
-# AGENTS.md — Tycorc/USDX
+# AGENTS.md — USDX fork
 
-This fork of UltraStar-Deluxe/USDX carries optional libmpv video playback for the
-owner's own karaoke use. Upstream declined the feature (UltraStar-Deluxe/USDX#1462):
-never open a pull request or issue against upstream. Changes land by pull request
-into this fork's `master`, which follows upstream `master`. Build and platform notes
-are in `COMPILING.md`.
+This UltraStar Deluxe fork carries optional libmpv video playback for personal
+karaoke use. Build and platform notes live in COMPILING.md.
 
-- `test/VideoSyncTest.pas` covers the audio-clock sync controller: seek-back during
-  the 400 ms screen fade, seek blanking, end of file against container duration.
-  Build and run it as `.github/workflows/video.yml` does; on a flakelab box fpc comes
-  from `nix shell nixpkgs#fpc`.
-- Native Windows verification runs from an ignored `build/windows-test-<shortsha>/`
-  root that holds its own scripts, songs, fixtures, libmpv runtime and CI artifacts.
-  A new root starts from the previous root's `tools/` with the commit and run id
-  updated; Windows reads WSL symlinks, so a root can link shared inputs. Only one
-  sample song has a video (25 fps, stream length equal to container duration), so the
-  native run does not cover low frame rates or audio that outlasts the video.
+- Never open a PR or issue against upstream for this feature; it was declined.
+  Changes land by PR into this fork's master, which follows upstream master.
+  Always specify this fork when using gh. Preserve its configured merge method,
+  hooks and required checks.
+- Read [video validation](docs/agents/video-validation.md) before playback,
+  audio-clock sync, libmpv or Windows work. Verify the intended platform and state
+  the native fixture limits; passing one sample is not coverage for every stream.
+- Keep optional playback behavior optional and preserve existing build/platform
+  support. Test through the existing video workflow and isolated native fixture
+  root; never commit songs, proprietary runtime inputs or test artifacts.
+- Keep private addresses, personal/employer details and credentials out of this
+  public repository. Use the repository-local identity or a GitHub noreply email.
+
+Keep repository-wide instructions here; put task-specific guidance in `docs/agents/`
+and link it from this file. README owns human setup and architecture; plans hold open work only.
