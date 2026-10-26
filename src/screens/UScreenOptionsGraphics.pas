@@ -52,6 +52,11 @@ type
       ResolutionEmpty:     integer; // not used, only to prevent changing original by-ref passed variable
 
       OldWindowMode:       integer;
+      VideoBackendIndex: integer;
+      VideoHardwareIndex: integer;
+      VideoBackendOptions: array of UTF8String;
+      VideoHardwareOptions: array of UTF8String;
+      procedure StoreVideoOptions;
 
       procedure UpdateWindowMode;
       procedure UpdateResolution;
@@ -89,6 +94,10 @@ type
     iOscilloscopeSlide,
     iPitchTraceSlide,
     iMoveSizeSlide,
+{$IFDEF UseMpvVideo}
+    iVideoBackendSlide,
+    iVideoHardwareSlide,
+{$ENDIF}
     iBackButton
   );
 
@@ -111,6 +120,7 @@ begin
       SDLK_ESCAPE,
       SDLK_BACKSPACE :
         begin
+          StoreVideoOptions;
           Ini.Save;
           AudioPlayback.PlaySound(SoundLib.Back);
           FadeTo(@ScreenOptions);
@@ -123,6 +133,7 @@ begin
         begin
           if SelInteraction = ord(iBackButton) then
           begin
+            StoreVideoOptions;
             Ini.Save;
             AudioPlayback.PlaySound(SoundLib.Back);
 
@@ -173,6 +184,14 @@ begin
   ResolutionEmpty := 0;
   SetLength(IResolutionEmpty, 1);
   IResolutionEmpty[0] := '---';
+  SetLength(VideoBackendOptions, 2);
+  VideoBackendOptions[0] := 'FFmpeg';
+  VideoBackendOptions[1] := 'MPV';
+  SetLength(VideoHardwareOptions, 2);
+  VideoHardwareOptions[0] := Language.Translate('OPTION_VALUE_OFF');
+  VideoHardwareOptions[1] := Language.Translate('OPTION_VALUE_AUTO');
+  VideoBackendIndex := Ord(Ini.VideoBackend = 'mpv');
+  VideoHardwareIndex := Ord(Ini.VideoHardwareDecoding = 'auto');
   Description := Language.Translate('SING_OPTIONS_GRAPHICS_DESC');
   WhereAmI := Language.Translate('SING_OPTIONS_GRAPHICS_WHEREAMI');
   Load;
@@ -229,6 +248,16 @@ begin
 
 end;
 
+procedure TScreenOptionsGraphics.StoreVideoOptions;
+begin
+{$IFDEF UseMpvVideo}
+  if VideoBackendIndex = 1 then Ini.VideoBackend := 'mpv'
+  else Ini.VideoBackend := 'ffmpeg';
+  if VideoHardwareIndex = 1 then Ini.VideoHardwareDecoding := 'auto'
+  else Ini.VideoHardwareDecoding := 'no';
+{$ENDIF}
+end;
+
 procedure TScreenOptionsGraphics.LoadWidgets;
 begin
   // when editing this, also update the InteractionID enum declaration
@@ -239,6 +268,10 @@ begin
   AddSelectSlide('SING_OPTIONS_GRAPHICS_OSCILLOSCOPE', Ini.Oscilloscope, IOscilloscopeTranslated);
   AddSelectSlide('SING_OPTIONS_GRAPHICS_PITCH_TRACE', Ini.PitchTrace, IOscilloscopeTranslated);
   AddSelectSlide('SING_OPTIONS_GRAPHICS_MOVIE_SIZE', Ini.MovieSize, IMovieSizeTranslated);
+{$IFDEF UseMpvVideo}
+  AddSelectSlide('SING_OPTIONS_GRAPHICS_VIDEO_BACKEND', VideoBackendIndex, VideoBackendOptions);
+  AddSelectSlide('SING_OPTIONS_GRAPHICS_VIDEO_HWDEC', VideoHardwareIndex, VideoHardwareOptions);
+{$ENDIF}
 end;
 
 end.

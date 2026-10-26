@@ -150,3 +150,9 @@ from the native executable and adds the dynamically loaded runtime libraries.
 Ubuntu packages are published by the separate [UltraStar-CE/apt repository](https://github.com/UltraStar-CE/apt).
 See its README for supported distributions, installation and signing/publication setup.
 The DEB packages themselves remain part of USCE releases.
+
+## Optional MPV video playback
+
+On Ubuntu install `libmpv-dev`, then build with `./configure --enable-debug --with-mpv` and `make`. The default `./configure` build keeps FFmpeg only. MPV is loaded dynamically; its runtime must be installed separately.
+
+Choose the video backend and hardware decoding in Tools > Options > Graphics and restart after changing the backend. FFmpeg remains the default and fallback. See [hardware video](doc/hardware-video.md) for configuration, platform runtime names and validation.
