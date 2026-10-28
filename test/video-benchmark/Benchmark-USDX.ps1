@@ -136,6 +136,9 @@ Language=English
           cpu_one_core_pct = 0; cpu_all_cores_pct = 0; process_cpu_seconds = 0; gpu_3d_pct = 0; gpu_decode_pct = 0
           peak_working_set_mb = 0; song_pos_at_start_s = $null; gpu_samples_missing = 0; valid = $false; note = ''}
         try {
+          # Keep a Windows process handle until post-exit CPU accounting is read.
+          # Without it, TotalProcessorTime can disappear after the game closes.
+          $null = $process.Handle
           $errorLog = Join-Path $scratch 'Error.log'
           $wait = [Diagnostics.Stopwatch]::StartNew()
           do {
@@ -193,9 +196,13 @@ Language=English
         } catch {
           $row.note = $_.Exception.Message
         } finally {
-          $process.Refresh()
-          if (-not $process.HasExited) { $process.Kill(); [void]$process.WaitForExit(5000) }
-          Get-ChildItem -LiteralPath $scratch -Filter '*.log' | Copy-Item -Destination $runDir
+          try {
+            $process.Refresh()
+            if (-not $process.HasExited) { $process.Kill(); [void]$process.WaitForExit(5000) }
+            Get-ChildItem -LiteralPath $scratch -Filter '*.log' | Copy-Item -Destination $runDir
+          } finally {
+            $process.Dispose()
+          }
         }
         Write-Host ("[$runName] {0} cpu {1}% of one core, gpu 3d {2}% decode {3}%, valid {4} {5}" -f `
           $row.decoder_used, $row.cpu_one_core_pct, $row.gpu_3d_pct, $row.gpu_decode_pct, $row.valid, $row.note)
