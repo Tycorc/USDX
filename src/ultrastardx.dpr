@@ -193,6 +193,7 @@ uses
   UDraw             in 'base\UDraw.pas',
   URecord           in 'base\URecord.pas',
   UTime             in 'base\UTime.pas',
+  UFramePacer       in 'base\UFramePacer.pas',
   USong             in 'base\USong.pas',
   USongs            in 'base\USongs.pas',
   UIni              in 'base\UIni.pas',
