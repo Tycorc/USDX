@@ -101,6 +101,7 @@ uses
   ULuaParty,
   ULuaScreenSing,
   UTime,
+  UFramePacer,
   UWebcam;
   //UVideoAcinerella;
 
@@ -300,9 +301,9 @@ end;
 
 procedure MainLoop;
 var
-  Delay:            integer;
-  TicksCurrent:     cardinal;
-  TicksBeforeFrame: cardinal;
+  FramePacer: TFramePacer;
+  FrameLimit: integer;
+  DisplayMode: TSDL_DisplayMode;
   Done:             boolean;
   Report: string;
   I,J: Integer;
@@ -314,10 +315,19 @@ begin
   Done := false;
   J := 1;
   CountSkipTime();
+  FramePacer := TFramePacer.Create;
+  try
   repeat
     try
     begin
-      TicksBeforeFrame := SDL_GetTicks;
+      FrameLimit := Max_FPS;
+      // A synchronized display cannot present above its refresh rate. Avoid
+      // overfilling the driver's queue even when the configured cap is higher.
+      if Renderer.VSync and
+         (SDL_GetCurrentDisplayMode(SDL_GetWindowDisplayIndex(Screen), @DisplayMode) = 0) and
+         (DisplayMode.refresh_rate > 0) then
+        FrameLimit := Min(FrameLimit, DisplayMode.refresh_rate);
+      FramePacer.WaitForFrame(FrameLimit);
 
       // keyboard/mouse/joystick events
       CheckEvents;
@@ -325,13 +335,6 @@ begin
       // display
       Done := not Display.Draw;
       Renderer.SwapBuffers;
-
-      // FPS limiter
-      TicksCurrent := SDL_GetTicks;
-      Delay := 1000 div MAX_FPS - (TicksCurrent - TicksBeforeFrame);
-
-      if Delay >= 1 then
-        SDL_Delay(Delay);
 
       CountSkipTime;
       J:=1;
@@ -362,6 +365,9 @@ begin
       end;
     end;
   until Done;
+  finally
+    FramePacer.Free;
+  end;
 
 end;
 
