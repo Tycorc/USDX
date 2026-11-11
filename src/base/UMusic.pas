@@ -674,7 +674,7 @@ function RefreshAudioInputDevices(ScanMode: TAudioInputScanMode): boolean;
 
 function  Visualization(): IVideoPlayback;
 function  VideoPlayback(): IVideoPlayback;
-function OpenVideoFallback(const FileName: IPath; const FailedBackend: IVideoPlayback): IVideo;
+function OpenVideoFallback(const FileName: IPath; const FailedBackend: IVideoPlayback; const Media: TBytes = nil): IVideo;
 function  AudioPlayback(): IAudioPlayback;
 function  AudioInput(): IAudioInput;
 function  AudioDecoders(): TInterfaceList;
@@ -805,7 +805,7 @@ begin
   Result := DefaultVideoPlayback;
 end;
 
-function OpenVideoFallback(const FileName: IPath; const FailedBackend: IVideoPlayback): IVideo;
+function OpenVideoFallback(const FileName: IPath; const FailedBackend: IVideoPlayback; const Media: TBytes = nil): IVideo;
 var
   Providers: TInterfaceList;
   Provider: IVideoPlayback;
@@ -830,7 +830,7 @@ begin
         Continue;
       if Provider.Init() then
       begin
-        Result := Provider.Open(FileName);
+        Result := Provider.Open(FileName, Media);
         if Result <> nil then
         begin
           Log.LogInfo('Using fallback ' + Provider.GetName, 'VideoPlayback');
