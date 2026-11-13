@@ -186,7 +186,8 @@ def main():
                 selection, marker, _ = output.partition("PASS configured video provider selection")
                 if not marker or re.search(r"(?:ERROR|CRITICAL):", selection):
                     raise RuntimeError("Configured video provider selection did not complete without errors")
-            for start, end in (("Testing in-memory preview", "PASS in-memory preview"),):
+            for start, end in (("Testing in-memory preview", "PASS in-memory preview"),
+                               ("Testing two MPV players", "PASS two MPV players")):
                 section, marker, _ = output.partition(start)[2].partition(end)
                 if start in output and (not marker or re.search(r"(?:ERROR|CRITICAL):", section)):
                     raise RuntimeError("Errors were logged between '%s' and its PASS line" % start)

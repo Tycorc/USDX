@@ -405,6 +405,44 @@ begin
   end;
   ConsoleWriteLn('PASS menu drawing after libmpv: unchanged after close and after finalize');
 end;
+
+procedure TestTwoPlayers;
+var Provider: IVideoPlayback; First, Second: IVideo; Round: integer; Started, Elapsed: cardinal;
+begin
+  Provider:=FindVideoProvider('MPV_Video');
+  Require(Provider<>nil,'missing MPV provider');
+  Require(Provider.Init,'cannot initialize MPV provider for two players');
+  ConsoleWriteLn('Testing two MPV players');
+  for Round:=1 to 2 do
+  begin
+    // One adopts the parked player if there is one, the other creates its own.
+    First:=Provider.Open(Path(ParamStr(2)));
+    Second:=Provider.Open(Path(ParamStr(2)));
+    Require(VideoClass(First)='TVideo_MPV','first of two opened '+VideoClass(First));
+    Require(VideoClass(Second)='TVideo_MPV','second of two opened '+VideoClass(Second));
+    First.Play;
+    Second.SetPosition(2);
+    Second.Play;
+    Started:=SDL_GetTicks;
+    repeat
+      Elapsed:=SDL_GetTicks-Started;
+      RenderVideo(First,Elapsed/1000);
+      RenderVideo(Second,2+Elapsed/1000);
+      SDL_PumpEvents;
+      SDL_Delay(10);
+    until Elapsed>=500;
+    RenderVideo(First,Elapsed/1000);
+    CheckVideoColors(0,'first of two players, round '+IntToStr(Round));
+    RenderVideo(Second,2+Elapsed/1000);
+    CheckVideoColors(2,'second of two players, round '+IntToStr(Round));
+    if Round=1 then begin First:=nil; Second:=nil; end
+    else begin Second:=nil; First:=nil; end;
+    CheckError('two players closed, round '+IntToStr(Round));
+  end;
+  Provider.Finalize;
+  CheckError('two players finalized');
+  ConsoleWriteLn('PASS two MPV players: both play their own position, close in either order');
+end;
 {$ENDIF}
 
 procedure Run;
@@ -520,6 +558,7 @@ begin
     TestVideoFallback;
     TestVideoWithoutFrame;
     TestVideoPreview;
+    TestTwoPlayers;
     {$ENDIF}
   end;
   Renderer.Free; Renderer:=nil;
