@@ -345,6 +345,66 @@ begin
   Provider.Finalize;
   ConsoleWriteLn('PASS in-memory preview: FFmpeg plays the snapshot to its end, the file stays replaceable');
 end;
+
+type
+  TScreenPixels = array[0..64*32*4-1] of byte;
+
+// Menu content drawn with the renderer calls menus use, read back from the window.
+procedure DrawMenu(Texture: TTexture; out Pixels: TScreenPixels);
+begin
+  Renderer.SetClearColor(0.2,0.3,0.4,1);
+  Renderer.ClearFrameBuffer(CLEAR_COLOR);
+  Renderer.Blend:=true;
+  Texture.X:=4; Texture.Y:=4; Texture.Z:=0; Texture.W:=24; Texture.H:=24;
+  Renderer.DrawTexture(Texture);
+  Renderer.DrawQuad(20,8,0,40,16,1,0.5,0,0.6);
+  glReadPixels(0,0,64,32,GL_RGBA,GL_UNSIGNED_BYTE,@Pixels[0]);
+  CheckError('menu drawing');
+end;
+
+procedure CompareMenu(const Expected, Actual: TScreenPixels; const Where: string);
+var I: integer;
+begin
+  for I:=0 to High(Expected) do
+    Require(Expected[I]=Actual[I],Where+': pixel '+IntToStr(I div 4 mod 64)+','+IntToStr(I div 256)+
+      ' channel '+IntToStr(I mod 4)+' is '+IntToStr(Actual[I])+', expected '+IntToStr(Expected[I]));
+end;
+
+procedure TestMenuAfterVideo;
+var
+  Provider: IVideoPlayback; Video: IVideo; Texture: TTexture;
+  Data: array[0..8*8*3-1] of byte; Expected, Actual: TScreenPixels; I: integer;
+begin
+  ConsoleWriteLn('Testing menu drawing after libmpv rendering');
+  for I:=0 to 63 do
+  begin
+    Data[I*3]:=(I mod 8)*32; Data[I*3+1]:=(I div 8)*32; Data[I*3+2]:=160;
+  end;
+  Texture:=Renderer.CreateTexture(@Data[0],PATH_NONE,8,8,TEXTURE_TYPE_PLAIN,false);
+  Require(Texture<>nil,'cannot create the menu texture');
+  try
+    DrawMenu(Texture,Expected);
+    Provider:=FindVideoProvider('MPV_Video');
+    Require(Provider<>nil,'missing MPV provider');
+    Require(Provider.Init,'cannot initialize MPV provider for the menu test');
+    Video:=Provider.Open(Path(ParamStr(2)));
+    Require(VideoClass(Video)='TVideo_MPV','the menu test opened '+VideoClass(Video));
+    Video.Play;
+    PumpVideo(Video,0,500,true);
+    CheckVideoColors(0,'video before the menu');
+    // Closing parks the player with its render target.
+    Video:=nil;
+    DrawMenu(Texture,Actual);
+    CompareMenu(Expected,Actual,'menu after closing an MPV video');
+    // Finalize frees the parked player and its target.
+    Provider.Finalize;
+    DrawMenu(Texture,Actual);
+    CompareMenu(Expected,Actual,'menu after finalizing the MPV provider');
+  finally
+    Texture.Free;
+  end;
+  ConsoleWriteLn('PASS menu drawing after libmpv: unchanged after close and after finalize');
+end;
 {$ENDIF}
 
 procedure Run;
@@ -448,6 +508,10 @@ begin
   ConsoleWriteLn('PASS ' + ModeName + ': offscreen texture output, state restoration, framebuffer separation and repeated lifetime');
   if ParamStr(2)<>'' then
   begin
+    {$IFDEF UseMpvVideo}
+    // First, so that no video has drawn before the reference menu.
+    TestMenuAfterVideo;
+    {$ENDIF}
     TestVideoSelection;
     TestVideo('FFmpeg_Video');
     {$IFDEF UseMpvVideo}
