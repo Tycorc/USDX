@@ -11,8 +11,9 @@ Build each checkout first, then run this same script/include against both:
 Use the same libraries, GL driver and configuration for both. Outputs are PPM
 captures, logs and a manifest; comparisons are exact, with no hidden tolerance.
 This tests caller-equivalent draw settings, not interactive UI/audio behavior.
-The reflection case preserves the existing video scissor behavior, including
-any reflection it clips away. It does not require reflection to be visible.
+The preview reflection case preserves the existing clipping. A separate
+negative-spacing overlap case must produce visible reflection pixels, using
+the public spacing setter without changing the production drawing code.
 """
 
 import argparse
@@ -137,11 +138,15 @@ def main():
         (output / (renderer + ".log")).write_text(log)
         result.check_returncode()
         captures = sorted(directory.glob("*.ppm"))
-        if len(captures) != 44 or re.search(r"(?:ERROR|CRITICAL):", log):
+        if len(captures) != 48 or re.search(r"(?:ERROR|CRITICAL):", log):
             raise RuntimeError(f"{renderer}: missing captures or logged errors; see {output / (renderer+'.log')}")
         for capture in captures:
             name = capture.relative_to(output).as_posix()
             manifest["captures"].append(name)
+            if name.endswith("-reflection-overlap.ppm"):
+                plain = output / name.replace("-reflection-overlap.ppm", "-preview-cover.ppm")
+                if compare_files(plain, capture) is None:
+                    raise RuntimeError(f"{name}: overlapping reflection changed no pixels")
             if "-memory-" in name:
                 difference = compare_files(output / name.replace("-memory-", "-file-"), capture)
                 if difference:

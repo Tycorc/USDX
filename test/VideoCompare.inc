@@ -138,6 +138,11 @@ begin
   CompareVideo.Reflection:=true;
   CompareVideo.ReflectionSpacing:=13;
   SaveCapture(Prefix+'-preview-reflection');
+  // Positive spacing is clipped by the video's box on both revisions.
+  // The public spacing setter also permits an overlap: exercise visible
+  // reflection pixels inside that box without changing production drawing.
+  CompareVideo.ReflectionSpacing:=-190;
+  SaveCapture(Prefix+'-reflection-overlap');
   // CoverFull explicitly requests fullscreen letterbox and no reflection.
   DefaultPresentation;
   CompareVideo.SetScreenPosition(0,0,1);
