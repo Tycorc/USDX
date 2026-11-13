@@ -443,6 +443,44 @@ begin
   CheckError('two players finalized');
   ConsoleWriteLn('PASS two MPV players: both play their own position, close in either order');
 end;
+
+// Output only: software rendering says little about a real GPU.
+procedure TestOpenTimes;
+var Provider: IVideoPlayback; Video: IVideo;
+
+  function TimedOpen(const FileName: IPath; const Name: string): IVideo;
+  var Started: UInt64;
+  begin
+    Started:=SDL_GetPerformanceCounter;
+    Result:=Provider.Open(FileName);
+    ConsoleWriteLn(Format('OPEN-TIME %s %.1f',
+      [Name,(SDL_GetPerformanceCounter-Started)*1000/SDL_GetPerformanceFrequency]));
+  end;
+
+begin
+  Provider:=FindVideoProvider('MPV_Video');
+  Require(Provider<>nil,'missing MPV provider');
+  ConsoleWriteLn('Measuring video open times');
+  // An MPV open returns once the first frame is in the video texture.
+  Provider.Finalize;
+  Require(Provider.Init,'cannot initialize MPV provider for open times');
+  Video:=TimedOpen(Path(ParamStr(2)),'fresh');
+  Require(VideoClass(Video)='TVideo_MPV','fresh open gave '+VideoClass(Video));
+  Video:=nil;
+  Video:=TimedOpen(Path(ParamStr(2)),'reused');
+  Require(VideoClass(Video)='TVideo_MPV','reused open gave '+VideoClass(Video));
+  Video:=nil;
+  Provider.Finalize;
+  Require(Provider.Init,'cannot initialize MPV provider again');
+  Video:=TimedOpen(Path(ParamStr(2)),'fresh-after-finalize');
+  Require(VideoClass(Video)='TVideo_MPV','open after finalize gave '+VideoClass(Video));
+  Video:=nil;
+  Video:=TimedOpen(Path(ParamStr(2)+'.corrupt'),'fallback-unreadable');
+  Require(Video=nil,'the unreadable file opened');
+  Provider.Finalize;
+  CheckError('open time measurement');
+  ConsoleWriteLn('PASS open times measured');
+end;
 {$ENDIF}
 
 procedure Run;
@@ -559,6 +597,7 @@ begin
     TestVideoWithoutFrame;
     TestVideoPreview;
     TestTwoPlayers;
+    TestOpenTimes;
     {$ENDIF}
   end;
   Renderer.Free; Renderer:=nil;

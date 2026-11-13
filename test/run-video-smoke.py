@@ -154,6 +154,7 @@ def main():
         fixture = temp / "quadrants.mp4"
         if not args.skip_video:
             make_fixture(fixture)
+        open_times = []
         for renderer in args.renderers:
             environment = dict(os.environ)
             if renderer == "gl2":
@@ -191,6 +192,7 @@ def main():
                 section, marker, _ = output.partition(start)[2].partition(end)
                 if start in output and (not marker or re.search(r"(?:ERROR|CRITICAL):", section)):
                     raise RuntimeError("Errors were logged between '%s' and its PASS line" % start)
+            open_times.append((renderer, re.findall(r"(?m)^OPEN-TIME (\S+) (\S+)$", output)))
             if output.count("Using libmpv video") < output.count("Testing MPV_Video"):
                 raise RuntimeError("The MPV playback test silently fell back to another backend")
             if "Testing expected libmpv initialization failure" in output and \
@@ -214,6 +216,11 @@ def main():
                 decoders = re.findall(r"Hardware decoder: ([\w-]+)", output)
                 if not decoders or decoders[-1] == "no":
                     raise RuntimeError("Playback did not finish with an active hardware decoder")
+        if any(times for _, times in open_times):
+            # No thresholds: software rendering in CI says little about a GPU.
+            print("Open times in ms (MPV until the first frame; unreadable file until the fallback answers):")
+            for renderer, times in open_times:
+                print("  %s: %s" % (renderer, ", ".join("%s %s" % pair for pair in times)))
         success = True
     finally:
         if success and not (args.keep_temp or args.output_dir or args.build_only):
