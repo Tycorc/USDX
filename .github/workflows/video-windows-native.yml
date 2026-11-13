@@ -1,0 +1,254 @@
+name: MPV validation and native Windows bundle
+
+# Explicit fork test runs only. This does not change release packaging or gates.
+on:
+  workflow_dispatch:
+  push:
+    branches: [test/usce-mpv-native-20261113]
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    if: github.repository == 'Tycorc/USDX'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Generate the smoke runner's synthetic fixtures
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ffmpeg
+          mkdir -p build/video-fixtures
+          python3 - <<'PY'
+          from pathlib import Path
+          import runpy
+          runpy.run_path('test/run-video-smoke.py')['make_fixture'](
+              Path('build/video-fixtures/quadrants.mp4'))
+          PY
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: video-fixtures-${{ github.sha }}
+          path: build/video-fixtures
+          retention-days: 7
+          if-no-files-found: error
+
+  windows:
+    if: github.repository == 'Tycorc/USDX'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      FPC_VERSION: 3.2.2
+      FPC_SHA256: 8C255390544B051388B577EB61C6191A04883264AFE0E3369B3600A56DAF7BDE
+    steps:
+      - name: Use LF source files
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          # Keep this package set aligned with platform-builds.yml for cache reuse.
+          install: >-
+            base-devel
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-autotools
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-git
+            mingw-w64-ucrt-x86_64-ntldd
+            mingw-w64-ucrt-x86_64-nasm
+            mingw-w64-ucrt-x86_64-python
+            patch
+            unzip
+      - name: Restore compiler
+        id: compiler
+        uses: actions/cache/restore@v6
+        with:
+          path: C:\FPC\3.2.2
+          key: windows-video-fpc-v1-${{ runner.arch }}-3.2.2
+          restore-keys: windows-fpc-nsis-v1-${{ runner.arch }}-fpc-3.2.2-nsis-3.05
+      - name: Install compiler if absent
+        run: |
+          if (Test-Path 'C:\FPC\3.2.2\bin\i386-win32\fpc.exe') { exit 0 }
+          curl.exe --fail --location --retry 3 --retry-all-errors --connect-timeout 30 --max-time 300 --output fpc-installer.exe "https://downloads.freepascal.org/fpc/dist/$($env:FPC_VERSION)/i386-win32/fpc-$($env:FPC_VERSION).win32.and.win64.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Compiler download failed' }
+          if ((Get-FileHash -Algorithm SHA256 fpc-installer.exe).Hash -ne $env:FPC_SHA256) { throw 'Unexpected FPC checksum' }
+          $p = Start-Process .\fpc-installer.exe -WindowStyle Hidden -ArgumentList '/TYPE=full /VERYSILENT /SP- /SUPPRESSMSGBOXES /NORESTART' -PassThru
+          if (-not $p.WaitForExit(600000)) { Stop-Process -Id $p.Id -Force; throw 'Compiler install timed out' }
+          if ($p.ExitCode -ne 0) { throw "Compiler install failed: $($p.ExitCode)" }
+      - name: Save compiler
+        if: steps.compiler.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: C:\FPC\3.2.2
+          key: windows-video-fpc-v1-${{ runner.arch }}-3.2.2
+      - name: Identify dependency environment
+        id: toolchain
+        shell: msys2 {0}
+        run: |
+          set -eo pipefail
+          package_key=$(pacman -Q | LC_ALL=C sort | sha256sum)
+          echo "key=${package_key%% *}" >> "$GITHUB_OUTPUT"
+      - name: Restore Windows DLL dependencies
+        id: dependencies
+        uses: actions/cache/restore@v6
+        with:
+          path: dists/windows/prefix
+          key: windows-2022-ucrt64-native-v2-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}-${{ hashFiles('dists/windows/tasks.sh', 'dists/windows/Makefile', 'dists/windows/*.patch') }}
+      - name: Build Windows DLL dependencies if absent
+        if: steps.dependencies.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: make -C dists/windows
+      - name: Save completed Windows DLL dependencies
+        if: steps.dependencies.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: dists/windows/prefix
+          key: ${{ steps.dependencies.outputs.cache-primary-key }}
+      - name: Install DLLs and compile both smoke variants
+        shell: msys2 {0}
+        run: |
+          set -eo pipefail
+          if [ '${{ steps.dependencies.outputs.cache-hit }}' = true ]; then
+            touch dists/windows/prefix/$(uname -m)/built_libs
+          fi
+          make -C dists/windows install
+          export PATH="$PATH:/c/FPC/$FPC_VERSION/bin/i386-win32"
+          export FPCCFG="/c/FPC/$FPC_VERSION/bin/i386-win32/fpc.cfg"
+          export FPCDIR="/c/FPC/$FPC_VERSION"
+          export FPCMAKE="/c/FPC/$FPC_VERSION/bin/i386-win32/fpcmake"
+          ./autogen.sh
+          ./configure --enable-debug --with-opencv --with-libprojectM --without-mpv
+          make
+          python test/run-video-smoke.py --build-only --output-dir build/video-without
+          make clean-src
+          ./configure --enable-debug --with-opencv --with-libprojectM --with-mpv=nocheck
+          make
+          python test/run-video-smoke.py --build-only --output-dir build/video-with
+      - name: Upload compiled inputs
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: video-windows-inputs-${{ github.sha }}
+          path: |
+            build/video-with/VideoSmoke.exe
+            build/video-without/VideoSmoke.exe
+            game/*.dll
+            game/*.exe
+            game/*.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  bundle:
+    if: github.repository == 'Tycorc/USDX'
+    needs: [fixtures, windows]
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: video-windows-inputs-${{ github.sha }}
+          path: .
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: video-fixtures-${{ github.sha }}
+          path: build/video-fixtures
+      - name: Assemble isolated native test bundle
+        run: python test/package-video-native.py --output build/video-native
+      - name: Check DLL closure without development paths
+        run: python tools/check_windows_runtime.py build/video-native/runtime
+      - name: Verify bundled Python imports and runner arguments
+        run: |
+          & build/video-native/python/python.exe -B build/video-native/test/run-video-smoke.py --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: USCE-windows-native-video-${{ github.sha }}
+          path: build/video-native
+          if-no-files-found: error
+          retention-days: 7
+
+  build_linux:
+    if: github.repository == 'Tycorc/USDX'
+    name: Linux (${{ matrix.mpv }} libmpv)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        mpv: [with, without]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            autoconf automake make gcc fpc pkg-config \
+            libsdl2-dev libsdl2-image-dev libfreetype6-dev libsqlite3-dev \
+            libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libswscale-dev \
+            portaudio19-dev libportmidi-dev liblua5.3-dev \
+            python3 ffmpeg xvfb xauth libgl1 libegl1 libgles2 \
+            libgl1-mesa-dri libglx-mesa0 libegl-mesa0
+      - name: Install libmpv
+        if: matrix.mpv == 'with'
+        run: sudo apt-get install --no-install-recommends -y libmpv-dev
+      - name: Configure
+        run: |
+          ./autogen.sh
+          ./configure --enable-debug --without-opencv --${{ matrix.mpv }}-mpv
+      - name: Build
+        run: make
+      - name: Test video clock synchronization
+        run: |
+          mkdir -p build/video-tests
+          fpc -Fusrc/media -FUbuild/video-tests -FEbuild/video-tests test/VideoSyncTest.pas
+          build/video-tests/VideoSyncTest
+      - name: Test rendering and video playback
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          SDL_VIDEODRIVER: x11
+        run: |
+          xvfb-run -a -s '-screen 0 1280x720x24' \
+            python3 test/run-video-smoke.py --output-dir build/video-smoke --renderers gl gl2 gles2 gles3
+      - name: Test hardware decoding option with software fallback
+        if: matrix.mpv == 'with'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          SDL_VIDEODRIVER: x11
+        run: |
+          xvfb-run -a -s '-screen 0 1280x720x24' \
+            python3 test/run-video-smoke.py --prebuilt build/video-smoke/VideoSmoke \
+              --fixture build/video-smoke/quadrants.mp4 --renderers gl --hwdec auto
+      - name: Test enabled build without the runtime library
+        if: matrix.mpv == 'with'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          SDL_VIDEODRIVER: x11
+        run: |
+          sudo apt-get remove -y libmpv-dev libmpv2
+          xvfb-run -a -s '-screen 0 1280x720x24' \
+            python3 test/run-video-smoke.py --prebuilt build/video-smoke/VideoSmoke \
+              --fixture build/video-smoke/quadrants.mp4 --renderers gl gl2 gles2 gles3 \
+              --expect-missing-mpv
+
+  platforms:
+    if: github.repository == 'Tycorc/USDX' && github.event_name == 'push'
+    name: Platforms
+    uses: ./.github/workflows/platform-builds.yml
+    with:
+      ref: ${{ github.sha }}
+      use-caches: true

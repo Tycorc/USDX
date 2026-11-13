@@ -509,6 +509,7 @@ begin
   ConsoleWriteLn('PASS open times measured');
 end;
 {$I VideoFailure.inc}
+{$I VideoPacing.inc}
 {$I VideoMissingMpv.inc}
 {$ENDIF}
 
@@ -638,6 +639,7 @@ begin
       TestVideoPreview;
       TestTwoPlayers;
       TestOpenTimes;
+      if ParamStr(4)<>'' then TestNativePacing(StrToInt(ParamStr(4)));
       {$ENDIF}
     end;
   end;

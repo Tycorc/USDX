@@ -87,12 +87,17 @@ def main():
     parser.add_argument("--require-hardware", action="store_true")
     parser.add_argument("--expect-missing-mpv", action="store_true",
                         help="test an MPV-enabled executable with no loadable libmpv")
+    parser.add_argument("--pacing-seconds", type=int, default=0,
+                        help="show a native video window and measure swap-loop intervals (10-120 seconds)")
     args = parser.parse_args()
     if args.require_hardware and (args.hwdec == "no" or args.skip_video):
         parser.error("--require-hardware needs --hwdec auto or auto-copy and video tests")
     if args.expect_missing_mpv and (args.skip_video or args.build_only or
-                                   args.require_hardware):
-        parser.error("--expect-missing-mpv needs video playback without hardware options")
+                                   args.require_hardware or args.pacing_seconds):
+        parser.error("--expect-missing-mpv needs video playback without hardware/pacing options")
+    if args.pacing_seconds and (not 10 <= args.pacing_seconds <= 120 or
+                               args.skip_video or len(args.renderers) != 1):
+        parser.error("--pacing-seconds needs 10-120 seconds, video tests and one renderer")
     root = Path(__file__).resolve().parent.parent
     src = root / "src"
     if args.prebuilt:
@@ -198,8 +203,8 @@ def main():
             command = [str(executable), renderer]
             if not args.skip_video:
                 command.extend([str(fixture), args.hwdec])
-                if args.expect_missing_mpv:
-                    command.append("0")
+                if args.pacing_seconds or args.expect_missing_mpv:
+                    command.append(str(args.pacing_seconds))
                 if args.expect_missing_mpv:
                     command.append("missing-mpv")
             print("Running", renderer, flush=True)
@@ -213,7 +218,7 @@ def main():
                 process_options = {"startupinfo": startup,
                                    "creationflags": subprocess.CREATE_NEW_CONSOLE}
             result = subprocess.run(command, cwd=temp, env=environment,
-                                    capture_output=True, text=True, timeout=90,
+                                    capture_output=True, text=True, timeout=90 + args.pacing_seconds,
                                     **process_options)
             output = result.stdout + result.stderr
             (temp / (renderer + ".log")).write_text(output)
@@ -266,12 +271,16 @@ def main():
                         raise RuntimeError("The hardware decoder was not probed exactly once per session")
                     if "Using remembered decoder" not in output:
                         raise RuntimeError("The probed decoder was not remembered for the next open")
+            if args.pacing_seconds and "PASS native pacing" not in output:
+                raise RuntimeError("Native pacing measurement did not complete")
             if args.require_hardware:
                 # Open-time measurements deliberately close the player before
                 # its asynchronous decoder switch. Inspect actual playback,
                 # not the final decoder log from those short opens.
                 playback, completed, _ = output.partition("Testing MPV_Video\n")[2].partition("PASS MPV_Video:")
                 sections = [("MPV playback", playback if completed else "")]
+                if args.pacing_seconds:
+                    sections.append(("native pacing", output.partition("PACING scope:")[2]))
                 for name, section in sections:
                     decoders = re.findall(r"Hardware decoder: ([\w-]+)", section)
                     if not decoders or decoders[-1] == "no":
