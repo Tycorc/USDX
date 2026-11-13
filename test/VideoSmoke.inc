@@ -253,6 +253,98 @@ begin
   Require(Elapsed<3000,'libmpv took '+IntToStr(Elapsed)+' ms to give up on a stream without frames');
   ConsoleWriteLn('PASS libmpv end without a frame: gave up after '+IntToStr(Elapsed)+' ms');
 end;
+
+function ReadBytes(const FileName: string): TBytes;
+var F: file;
+begin
+  AssignFile(F,FileName);
+  Reset(F,1);
+  try
+    SetLength(Result,FileSize(F));
+    BlockRead(F,Result[0],Length(Result));
+  finally
+    CloseFile(F);
+  end;
+end;
+
+procedure WriteBytes(const FileName: string; const Data: TBytes);
+var F: file;
+begin
+  AssignFile(F,FileName);
+  Rewrite(F,1);
+  try
+    BlockWrite(F,Data[0],Length(Data));
+  finally
+    CloseFile(F);
+  end;
+end;
+
+{$IFDEF Linux}
+function readlink(Name, Buffer: PAnsiChar; Size: SizeUInt): SizeInt; cdecl; external 'c';
+
+// Counts this process's file descriptors that refer to FileName.
+function OpenHandles(const FileName: string): integer;
+var Entry: TSearchRec; Link: array[0..4095] of AnsiChar; Count: SizeInt; Target: string;
+begin
+  Result:=0;
+  if FindFirst('/proc/self/fd/*',faAnyFile,Entry)<>0 then
+    raise Exception.Create('cannot list /proc/self/fd');
+  try
+    repeat
+      Count:=readlink(PAnsiChar(AnsiString('/proc/self/fd/'+Entry.Name)),@Link[0],SizeOf(Link));
+      if Count<=0 then Continue;
+      SetString(Target,PAnsiChar(@Link[0]),Count);
+      // A replaced file that is still open reads "<name> (deleted)".
+      if (Target=FileName) or (Target=FileName+' (deleted)') then Inc(Result);
+    until FindNext(Entry)<>0;
+  finally
+    FindClose(Entry);
+  end;
+end;
+{$ENDIF}
+
+procedure TestVideoPreview;
+var Provider: IVideoPlayback; Video: IVideo; Media: TBytes; Source: string;
+begin
+  Provider:=FindVideoProvider('MPV_Video');
+  Require(Provider<>nil,'missing MPV provider');
+  Require(Provider.Init,'cannot initialize MPV provider for the preview test');
+  Ini.VideoBackend:='mpv';
+  ConsoleWriteLn('Testing in-memory preview with MPV selected');
+  // Song selection reads the preview into memory, as TPreviewMediaLoad does.
+  Media:=ReadBytes(ParamStr(2));
+  Source:=ExpandFileName('preview.mp4');
+  WriteBytes(Source,Media);
+  Video:=Provider.Open(Path(Source),Media);
+  Require(VideoClass(Video)='TVideo_FFmpeg','the snapshot opened as '+VideoClass(Video));
+  PumpVideo(Video,0,250,false);
+  CheckVideoColors(0,'preview initial orientation');
+  Video.Play;
+  PumpVideo(Video,0,1400,true);
+  CheckVideoColors(1,'preview advancing clock');
+  {$IFDEF Linux}
+  Require(OpenHandles(Source)=0,'the preview holds its file open');
+  {$ENDIF}
+  // Replace the file the way a song editor or download does: write a new
+  // file and rename it over the old one. Windows cannot rename over a file.
+  WriteBytes(Source+'.new',BytesOf('replaced'));
+  {$IFDEF MSWINDOWS}
+  Require(DeleteFile(Source),'cannot delete the preview file while it plays');
+  {$ENDIF}
+  Require(RenameFile(Source+'.new',Source),'cannot replace the preview file');
+  PumpVideo(Video,1.4,1900,true);
+  CheckVideoColors(3,'preview after its file was replaced');
+  PumpVideo(Video,3.3,1200,true);
+  Require(Video.Finished,'the preview did not finish at the end of its snapshot');
+  CheckVideoColors(3,'preview end of snapshot');
+  {$IFDEF Linux}
+  Require(OpenHandles(Source)=0,'the preview holds its file open');
+  {$ENDIF}
+  Video:=nil;
+  CheckError('preview destruction');
+  Provider.Finalize;
+  ConsoleWriteLn('PASS in-memory preview: FFmpeg plays the snapshot to its end, the file stays replaceable');
+end;
 {$ENDIF}
 
 procedure Run;
@@ -363,6 +455,7 @@ begin
     TestVideoStartup;
     TestVideoFallback;
     TestVideoWithoutFrame;
+    TestVideoPreview;
     {$ENDIF}
   end;
   Renderer.Free; Renderer:=nil;
