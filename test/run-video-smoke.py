@@ -19,6 +19,7 @@ import argparse
 import os
 from pathlib import Path
 import re
+import runpy
 import shlex
 import shutil
 import subprocess
@@ -66,6 +67,8 @@ def make_fixture(destination):
         "-pix_fmt", "yuv420p", "-bsf:v", "filter_units=remove_types=5",
         "-f", "mp4", str(destination.with_suffix(destination.suffix + ".noframe"))
     ], input=frame * 10, check=True)
+    runpy.run_path(str(Path(__file__).with_name("video_failure_fixture.py")))["make_failure_fixture"](
+        destination.with_suffix(destination.suffix + ".oversize"))
 
 
 def main():
@@ -73,21 +76,46 @@ def main():
     parser.add_argument("--renderers", nargs="+", default=["gl"],
                         choices=["gl", "gl2", "gles2", "gles3"])
     parser.add_argument("--skip-video", action="store_true")
+    parser.add_argument("--prebuilt", type=Path,
+                        help="run this existing test executable without a compiler")
+    parser.add_argument("--fixture", type=Path,
+                        help="existing quadrants.mp4 and its .corrupt/.noframe/.oversize companions")
     parser.add_argument("--keep-temp", action="store_true")
     parser.add_argument("--build-only", "--compile-only", action="store_true")
     parser.add_argument("--output-dir", "--output-directory", type=Path)
     parser.add_argument("--hwdec", choices=["no", "auto", "auto-copy"], default="no")
     parser.add_argument("--require-hardware", action="store_true")
+    parser.add_argument("--expect-missing-mpv", action="store_true",
+                        help="test an MPV-enabled executable with no loadable libmpv")
     args = parser.parse_args()
     if args.require_hardware and (args.hwdec == "no" or args.skip_video):
         parser.error("--require-hardware needs --hwdec auto or auto-copy and video tests")
+    if args.expect_missing_mpv and (args.skip_video or args.build_only or
+                                   args.require_hardware):
+        parser.error("--expect-missing-mpv needs video playback without hardware options")
     root = Path(__file__).resolve().parent.parent
     src = root / "src"
-    if not (src / "Makefile").exists() or not (src / "paths.inc").exists():
-        parser.error("configure and build USCE before running this test")
-    makefile = (src / "Makefile").read_text()
-    suffix = re.search(r"(?m)^EXEEXT[ \t]*\?=[ \t]*(.*)$", makefile).group(1).strip()
-    windows = suffix == ".exe"
+    if args.prebuilt:
+        if args.build_only:
+            parser.error("--prebuilt cannot be combined with --build-only")
+        args.prebuilt = args.prebuilt.resolve()
+        if not args.prebuilt.is_file():
+            parser.error("--prebuilt must name an existing executable")
+        if not args.skip_video and not args.fixture:
+            parser.error("--prebuilt needs --fixture unless --skip-video is used")
+        suffix = args.prebuilt.suffix
+    else:
+        if not (src / "Makefile").exists() or not (src / "paths.inc").exists():
+            parser.error("configure and build USCE before running this test")
+        makefile = (src / "Makefile").read_text()
+        suffix = re.search(r"(?m)^EXEEXT[ \t]*\?=[ \t]*(.*)$", makefile).group(1).strip()
+    windows = suffix.lower() == ".exe"
+    if args.fixture:
+        args.fixture = args.fixture.resolve()
+        for name in (str(args.fixture), str(args.fixture) + ".corrupt",
+                     str(args.fixture) + ".noframe", str(args.fixture) + ".oversize"):
+            if not Path(name).is_file():
+                parser.error("missing fixture: " + name)
 
     def compiler_path(path):
         # The MSYS Python interpreter returns POSIX paths; native FPC needs
@@ -107,52 +135,56 @@ def main():
         temp = Path(tempfile.mkdtemp(prefix="usdx-video-smoke-"))
     success = False
     try:
-        # FPC can reuse PPUs beside the program source even with -B. Keep every
-        # compiler search/output directory fresh when --output-dir is reused.
-        compile_dir = Path(tempfile.mkdtemp(prefix="compile-", dir=temp))
-        # USCE's main program explicitly orders cyclic Pascal units and selects
-        # versioned bindings. Reuse that list instead of maintaining a second one.
-        project = (src / "usce.dpr").read_text()
-        marker = re.search(r"(?m)^const\s*\n\s*sLineBreakWin", project)
-        if not marker:
-            raise RuntimeError("Could not locate the end of the application's unit list")
-        header = project[:marker.start()].replace("program usce;", "program VideoSmoke;")
-        # The test has no app icon/resources and must retain a console on Windows.
-        header = re.sub(r"(?m)^\s*\{\$R [^\n]+\}\s*$", "", header)
-        header = header.replace("program VideoSmoke;", "program VideoSmoke;\n{$DEFINE CONSOLE}")
-        source_prefix = compiler_path(src)
-        header = re.sub(
-            r"in '([^']+)'",
-            lambda match: "in '" + source_prefix + "/" + match[1].replace("\\", "/") + "'",
-            header,
-        )
-        source = compile_dir / "VideoSmoke.pas"
-        source.write_text(header + (root / "test" / "VideoSmoke.inc").read_text())
-        executable = temp / ("VideoSmoke" + suffix)
-        compiled_executable = compile_dir / executable.name
-        extra_flags = [
-            "-B", "-dCONSOLE", "-Fi" + source_prefix, "-FU" + compiler_path(compile_dir),
-            "-FE" + compiler_path(compile_dir), "-o" + compiler_path(compiled_executable)
-        ]
-        if windows:
-            extra_flags.append("-WC")
-        extra_flags.append(compiler_path(source))
-        extra = " ".join(shlex.quote(value) for value in extra_flags)
-        # Use the configured compiler, defines and link flags. The final -FU/-FE
-        # keep all generated units and binaries outside the working tree.
-        recipe = "video-smoke-build:; $(PPC) $(PFLAGS_ALL) " + extra
-        subprocess.run([
-            "make", "--no-print-directory", "-s", "-C", str(src),
-            "PCUNIT_FLAGS=",
-            "--eval=.PHONY: video-smoke-build", "--eval=" + recipe, "video-smoke-build"
-        ], check=True)
-        shutil.copy2(compiled_executable, executable)
-        if args.build_only:
-            print("Built", executable, flush=True)
-            success = True
-            return
-        fixture = temp / "quadrants.mp4"
-        if not args.skip_video:
+        if args.prebuilt:
+            executable = args.prebuilt
+        else:
+            # FPC can reuse PPUs beside the program source even with -B. Keep every
+            # compiler search/output directory fresh when --output-dir is reused.
+            compile_dir = Path(tempfile.mkdtemp(prefix="compile-", dir=temp))
+            # USCE's main program explicitly orders cyclic Pascal units and selects
+            # versioned bindings. Reuse that list instead of maintaining a second one.
+            project = (src / "usce.dpr").read_text()
+            marker = re.search(r"(?m)^const\s*\n\s*sLineBreakWin", project)
+            if not marker:
+                raise RuntimeError("Could not locate the end of the application's unit list")
+            header = project[:marker.start()].replace("program usce;", "program VideoSmoke;")
+            # The test has no app icon/resources and must retain a console on Windows.
+            header = re.sub(r"(?m)^\s*\{\$R [^\n]+\}\s*$", "", header)
+            header = header.replace("program VideoSmoke;", "program VideoSmoke;\n{$DEFINE CONSOLE}")
+            source_prefix = compiler_path(src)
+            header = re.sub(
+                r"in '([^']+)'",
+                lambda match: "in '" + source_prefix + "/" + match[1].replace("\\", "/") + "'",
+                header,
+            )
+            source = compile_dir / "VideoSmoke.pas"
+            source.write_text(header + (root / "test" / "VideoSmoke.inc").read_text())
+            executable = temp / ("VideoSmoke" + suffix)
+            compiled_executable = compile_dir / executable.name
+            extra_flags = [
+                "-B", "-dCONSOLE", "-Fi" + source_prefix,
+                "-Fi" + compiler_path(root / "test"), "-FU" + compiler_path(compile_dir),
+                "-FE" + compiler_path(compile_dir), "-o" + compiler_path(compiled_executable)
+            ]
+            if windows:
+                extra_flags.append("-WC")
+            extra_flags.append(compiler_path(source))
+            extra = " ".join(shlex.quote(value) for value in extra_flags)
+            # Use the configured compiler, defines and link flags. The final -FU/-FE
+            # keep all generated units and binaries outside the working tree.
+            recipe = "video-smoke-build:; $(PPC) $(PFLAGS_ALL) " + extra
+            subprocess.run([
+                "make", "--no-print-directory", "-s", "-C", str(src),
+                "PCUNIT_FLAGS=",
+                "--eval=.PHONY: video-smoke-build", "--eval=" + recipe, "video-smoke-build"
+            ], check=True)
+            shutil.copy2(compiled_executable, executable)
+            if args.build_only:
+                print("Built", executable, flush=True)
+                success = True
+                return
+        fixture = args.fixture or temp / "quadrants.mp4"
+        if not args.skip_video and not args.fixture:
             make_fixture(fixture)
         open_times = []
         for renderer in args.renderers:
@@ -166,6 +198,10 @@ def main():
             command = [str(executable), renderer]
             if not args.skip_video:
                 command.extend([str(fixture), args.hwdec])
+                if args.expect_missing_mpv:
+                    command.append("0")
+                if args.expect_missing_mpv:
+                    command.append("missing-mpv")
             print("Running", renderer, flush=True)
             # ConsoleWriteLn checks for a console window on Windows, including
             # when output is redirected. Keep that console hidden during tests.
@@ -183,6 +219,13 @@ def main():
             (temp / (renderer + ".log")).write_text(output)
             print(output, end="", flush=True)
             result.check_returncode()
+            if args.expect_missing_mpv:
+                if ("PASS missing libmpv fallback:" not in output or
+                        output.count("; FFmpeg plays all videos") != 1 or
+                        "Using libmpv video" in output or
+                        re.search(r"(?:ERROR|CRITICAL):", output)):
+                    raise RuntimeError("Missing-libmpv fallback did not pass with one warning and no errors")
+                continue
             if not args.skip_video:
                 selection, marker, _ = output.partition("PASS configured video provider selection")
                 if not marker or re.search(r"(?:ERROR|CRITICAL):", selection):
@@ -192,6 +235,12 @@ def main():
                 section, marker, _ = output.partition(start)[2].partition(end)
                 if start in output and (not marker or re.search(r"(?:ERROR|CRITICAL):", section)):
                     raise RuntimeError("Errors were logged between '%s' and its PASS line" % start)
+            if "Testing real mid-stream render-target failure" in output:
+                section, marker, _ = output.partition("Testing real mid-stream render-target failure")[2].partition("PASS mid-stream render-target failure:")
+                errors = re.findall(r"(?m)^ERROR:.*$", section)
+                if (not marker or len(errors) != 1 or
+                        "Cannot create libmpv video texture" not in errors[0] or "CRITICAL:" in section):
+                    raise RuntimeError("Mid-stream test did not finish with exactly the expected render-target error")
             open_times.append((renderer, re.findall(r"(?m)^OPEN-TIME (\S+) (\S+)$", output)))
             if output.count("Using libmpv video") < output.count("Testing MPV_Video"):
                 raise RuntimeError("The MPV playback test silently fell back to another backend")
@@ -202,6 +251,11 @@ def main():
                     "libmpv reached the end without a video frame" not in output:
                 raise RuntimeError("libmpv did not reject a stream that ended without a frame")
             if "Testing MPV_Video startup" in output:
+                for required in ("PASS in-memory preview:", "PASS menu drawing after libmpv:",
+                                 "PASS two MPV players:", "PASS open times measured",
+                                 "PASS mid-stream render-target failure:"):
+                    if required not in output:
+                        raise RuntimeError("Missing required MPV check: " + required)
                 if "Reusing libmpv player" not in output:
                     raise RuntimeError("The libmpv player was not reused across opens")
                 if args.hwdec == "no":
@@ -213,9 +267,15 @@ def main():
                     if "Using remembered decoder" not in output:
                         raise RuntimeError("The probed decoder was not remembered for the next open")
             if args.require_hardware:
-                decoders = re.findall(r"Hardware decoder: ([\w-]+)", output)
-                if not decoders or decoders[-1] == "no":
-                    raise RuntimeError("Playback did not finish with an active hardware decoder")
+                # Open-time measurements deliberately close the player before
+                # its asynchronous decoder switch. Inspect actual playback,
+                # not the final decoder log from those short opens.
+                playback, completed, _ = output.partition("Testing MPV_Video\n")[2].partition("PASS MPV_Video:")
+                sections = [("MPV playback", playback if completed else "")]
+                for name, section in sections:
+                    decoders = re.findall(r"Hardware decoder: ([\w-]+)", section)
+                    if not decoders or decoders[-1] == "no":
+                        raise RuntimeError(name + " did not finish with an active hardware decoder")
         if any(times for _, times in open_times):
             # No thresholds: software rendering in CI says little about a GPU.
             print("Open times in ms (MPV until the first frame; unreadable file until the fallback answers):")

@@ -127,20 +127,49 @@ begin
   until NowTick-Started>=Milliseconds;
 end;
 
-procedure CheckVideoColors(Phase: integer; const Where: string);
+function VideoColorsMatch(Phase: integer; out Detail: string): boolean;
 const
   Colors: array[0..3,0..2] of byte=((255,0,0),(0,255,0),(0,0,255),(255,255,0));
 var X,Y,C,Q: integer; Actual: array[0..3] of byte;
 begin
+  Result:=false;
   for Y:=0 to 1 do
     for X:=0 to 1 do
     begin
       glReadPixels(16+32*X,24-16*Y,1,1,GL_RGBA,GL_UNSIGNED_BYTE,@Actual[0]);
       Q:=(Y*2+X+Phase) mod 4;
       for C:=0 to 2 do
-        Require(Abs(integer(Actual[C])-Colors[Q,C])<55,
-          Where+' quadrant '+IntToStr(Y*2+X)+' RGB '+IntToStr(Actual[0])+','+IntToStr(Actual[1])+','+IntToStr(Actual[2]));
+        if Abs(integer(Actual[C])-Colors[Q,C])>=55 then
+        begin
+          Detail:=' quadrant '+IntToStr(Y*2+X)+' RGB '+IntToStr(Actual[0])+','+
+            IntToStr(Actual[1])+','+IntToStr(Actual[2]);
+          Exit;
+        end;
     end;
+  Detail:='';
+  Result:=true;
+end;
+
+procedure CheckVideoColors(Phase: integer; const Where: string);
+var Detail: string; Matches: boolean;
+begin
+  Matches:=VideoColorsMatch(Phase,Detail);
+  Require(Matches,Where+Detail);
+end;
+
+// FFmpeg decodes asynchronously. Wait for the paused first frame rather than
+// assuming the decode thread was scheduled within a fixed 100 or 250 ms.
+procedure WaitFirstVideoFrame(const Video: IVideo; const Where: string);
+var Started: cardinal; Detail: string;
+begin
+  Started:=SDL_GetTicks;
+  repeat
+    RenderVideo(Video,0);
+    if VideoColorsMatch(0,Detail) then Exit;
+    SDL_PumpEvents;
+    SDL_Delay(10);
+  until SDL_GetTicks-Started>=3000;
+  CheckVideoColors(0,Where+' after waiting for the first frame');
 end;
 
 procedure TestVideo(const ProviderName: string);
@@ -149,11 +178,10 @@ begin
   Provider:=FindVideoProvider(ProviderName);
   Require(Provider<>nil,'missing '+ProviderName);
   Require(Provider.Init,'cannot initialize '+ProviderName);
+  ConsoleWriteLn('Testing ' + ProviderName);
   Video:=Provider.Open(Path(ParamStr(2)));
   Require(Video<>nil,'cannot open video '+ProviderName);
-  ConsoleWriteLn('Testing ' + ProviderName);
-  PumpVideo(Video,0,250,false);
-  CheckVideoColors(0,ProviderName+' initial orientation');
+  WaitFirstVideoFrame(Video,ProviderName+' initial orientation');
   Video.Play;
   PumpVideo(Video,0,1400,true);
   CheckVideoColors(1,ProviderName+' advancing clock');
@@ -227,8 +255,7 @@ begin
     TRendererTestAccess(Renderer).SupportsRenderTargets:=SupportsTargets;
   end;
   Require(Video<>nil,'fallback did not open valid video');
-  PumpVideo(Video,0,100,false);
-  CheckVideoColors(0,'FFmpeg fallback');
+  WaitFirstVideoFrame(Video,'FFmpeg fallback');
   Video:=nil;
   Provider.Finalize;
   CheckError('fallback video destruction');
@@ -260,8 +287,9 @@ begin
   AssignFile(F,FileName);
   Reset(F,1);
   try
+    Result:=nil;
     SetLength(Result,FileSize(F));
-    BlockRead(F,Result[0],Length(Result));
+    if Length(Result)>0 then BlockRead(F,Result[0],Length(Result));
   finally
     CloseFile(F);
   end;
@@ -273,7 +301,7 @@ begin
   AssignFile(F,FileName);
   Rewrite(F,1);
   try
-    BlockWrite(F,Data[0],Length(Data));
+    if Length(Data)>0 then BlockWrite(F,Data[0],Length(Data));
   finally
     CloseFile(F);
   end;
@@ -317,8 +345,7 @@ begin
   WriteBytes(Source,Media);
   Video:=Provider.Open(Path(Source),Media);
   Require(VideoClass(Video)='TVideo_FFmpeg','the snapshot opened as '+VideoClass(Video));
-  PumpVideo(Video,0,250,false);
-  CheckVideoColors(0,'preview initial orientation');
+  WaitFirstVideoFrame(Video,'preview initial orientation');
   Video.Play;
   PumpVideo(Video,0,1400,true);
   CheckVideoColors(1,'preview advancing clock');
@@ -481,6 +508,8 @@ begin
   CheckError('open time measurement');
   ConsoleWriteLn('PASS open times measured');
 end;
+{$I VideoFailure.inc}
+{$I VideoMissingMpv.inc}
 {$ENDIF}
 
 procedure Run;
@@ -520,85 +549,97 @@ begin
   Renderer.Blend:=false;
   Renderer.ScissorTest:=false;
   CheckError('renderer initialized');
-  Require(Renderer.CreateRenderTarget(0,32) = nil,'invalid target size accepted');
-  Require(Renderer.CreateRenderTarget(Renderer.MaxTextureSize+1,32) = nil,'oversized target accepted');
-  A := Renderer.CreateRenderTarget(64,32);
-  Require(A <> nil,'render target unsupported');
-  CheckError('target created');
-  if Renderer is TRenderer_OpenGL2 then
+  if ParamStr(5)='missing-mpv' then
   begin
-    CaptureStarted := Renderer.BeginTextureCapture(A.Texture,64,32);
-    if CaptureStarted then Renderer.EndTextureCapture;
-    Require(not CaptureStarted,'legacy OpenGL unexpectedly enables menu-fade captures');
-  end;
-  if ModeName <> 'gles2' then
+    {$IFDEF UseMpvVideo}
+    TestMissingMpv;
+    {$ELSE}
+    raise Exception.Create('missing-runtime test needs an MPV-enabled build');
+    {$ENDIF}
+  end
+  else
   begin
-    glBindFramebuffer(GL_READ_FRAMEBUFFER,A.NativeHandle);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER,0);
-    B := Renderer.CreateRenderTarget(31,17);
-    Require(B <> nil,'second target unsupported');
-    CheckInt(GL_READ_FRAMEBUFFER_BINDING,A.NativeHandle,'read framebuffer after create');
-    CheckInt(GL_DRAW_FRAMEBUFFER_BINDING,0,'draw framebuffer after create');
-    B.BeginRender;
-    glBindFramebuffer(GL_FRAMEBUFFER,0);
-    B.EndRender;
-    CheckInt(GL_READ_FRAMEBUFFER_BINDING,A.NativeHandle,'read framebuffer after external render');
-    CheckInt(GL_DRAW_FRAMEBUFFER_BINDING,0,'draw framebuffer after external render');
-    B.Free;
-    glBindFramebuffer(GL_FRAMEBUFFER,0);
-  end;
-  Renderer.SetViewPort(2,3,40,20);
-  glEnable(GL_BLEND); glEnable(GL_SCISSOR_TEST);
-  glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ZERO);
-  glScissor(1,2,30,15);
-  A.BeginRender;
-  glViewport(0,0,64,32);
-  glClearColor(1,0,0,1);
-  glClear(GL_COLOR_BUFFER_BIT);
-  glDisable(GL_BLEND); glDisable(GL_SCISSOR_TEST);
-  glBlendFunc(GL_ONE,GL_ONE);
-  A.EndRender;
-  glGetIntegerv(GL_VIEWPORT,@Saved[0]);
-  Require((Saved[0]=2) and (Saved[1]=3) and (Saved[2]=40) and (Saved[3]=20),'viewport not restored');
-  Require(glIsEnabled(GL_BLEND),'blend not restored');
-  Require(glIsEnabled(GL_SCISSOR_TEST),'scissor enable not restored');
-  CheckInt(GL_BLEND_SRC_RGB,GL_SRC_ALPHA,'blend source');
-  CheckInt(GL_BLEND_DST_RGB,GL_ONE_MINUS_SRC_ALPHA,'blend destination');
-  CheckError('external state restored');
-  Renderer.SetViewPort(0,0,64,32);
-  Renderer.Blend:=false; Renderer.ScissorTest:=false;
-  Renderer.SetClearColor(0,0,1,1); Renderer.ClearFrameBuffer(CLEAR_COLOR);
-  A.Texture.X:=0; A.Texture.Y:=0; A.Texture.Z:=0; A.Texture.W:=64; A.Texture.H:=32;
-  Renderer.DrawTexture(A.Texture);
-  glReadPixels(32,16,1,1,GL_RGBA,GL_UNSIGNED_BYTE,@Pixel[0]);
-  Require((Pixel[0]>240) and (Pixel[1]<10) and (Pixel[2]<10),'render target texture was not drawn red');
-  CheckError('target drawn by USDX');
-  A.Free; A:=nil;
-  for I:=1 to 20 do
-  begin
-    A:=Renderer.CreateRenderTarget(31,17);
-    Require(A<>nil,'repeat target allocation');
+    Require(Renderer.CreateRenderTarget(0,32) = nil,'invalid target size accepted');
+    Require(Renderer.CreateRenderTarget(Renderer.MaxTextureSize+1,32) = nil,'oversized target accepted');
+    A := Renderer.CreateRenderTarget(64,32);
+    Require(A <> nil,'render target unsupported');
+    CheckError('target created');
+    if Renderer is TRenderer_OpenGL2 then
+    begin
+      CaptureStarted := Renderer.BeginTextureCapture(A.Texture,64,32);
+      if CaptureStarted then Renderer.EndTextureCapture;
+      Require(not CaptureStarted,'legacy OpenGL unexpectedly enables menu-fade captures');
+    end;
+    if ModeName <> 'gles2' then
+    begin
+      glBindFramebuffer(GL_READ_FRAMEBUFFER,A.NativeHandle);
+      glBindFramebuffer(GL_DRAW_FRAMEBUFFER,0);
+      B := Renderer.CreateRenderTarget(31,17);
+      Require(B <> nil,'second target unsupported');
+      CheckInt(GL_READ_FRAMEBUFFER_BINDING,A.NativeHandle,'read framebuffer after create');
+      CheckInt(GL_DRAW_FRAMEBUFFER_BINDING,0,'draw framebuffer after create');
+      B.BeginRender;
+      glBindFramebuffer(GL_FRAMEBUFFER,0);
+      B.EndRender;
+      CheckInt(GL_READ_FRAMEBUFFER_BINDING,A.NativeHandle,'read framebuffer after external render');
+      CheckInt(GL_DRAW_FRAMEBUFFER_BINDING,0,'draw framebuffer after external render');
+      B.Free;
+      glBindFramebuffer(GL_FRAMEBUFFER,0);
+    end;
+    Renderer.SetViewPort(2,3,40,20);
+    glEnable(GL_BLEND); glEnable(GL_SCISSOR_TEST);
+    glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ZERO);
+    glScissor(1,2,30,15);
+    A.BeginRender;
+    glViewport(0,0,64,32);
+    glClearColor(1,0,0,1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_BLEND); glDisable(GL_SCISSOR_TEST);
+    glBlendFunc(GL_ONE,GL_ONE);
+    A.EndRender;
+    glGetIntegerv(GL_VIEWPORT,@Saved[0]);
+    Require((Saved[0]=2) and (Saved[1]=3) and (Saved[2]=40) and (Saved[3]=20),'viewport not restored');
+    Require(glIsEnabled(GL_BLEND),'blend not restored');
+    Require(glIsEnabled(GL_SCISSOR_TEST),'scissor enable not restored');
+    CheckInt(GL_BLEND_SRC_RGB,GL_SRC_ALPHA,'blend source');
+    CheckInt(GL_BLEND_DST_RGB,GL_ONE_MINUS_SRC_ALPHA,'blend destination');
+    CheckError('external state restored');
+    Renderer.SetViewPort(0,0,64,32);
+    Renderer.Blend:=false; Renderer.ScissorTest:=false;
+    Renderer.SetClearColor(0,0,1,1); Renderer.ClearFrameBuffer(CLEAR_COLOR);
+    A.Texture.X:=0; A.Texture.Y:=0; A.Texture.Z:=0; A.Texture.W:=64; A.Texture.H:=32;
+    Renderer.DrawTexture(A.Texture);
+    glReadPixels(32,16,1,1,GL_RGBA,GL_UNSIGNED_BYTE,@Pixel[0]);
+    Require((Pixel[0]>240) and (Pixel[1]<10) and (Pixel[2]<10),'render target texture was not drawn red');
+    CheckError('target drawn by USDX');
     A.Free; A:=nil;
-  end;
-  CheckError('target destruction');
-  ConsoleWriteLn('PASS ' + ModeName + ': offscreen texture output, state restoration, framebuffer separation and repeated lifetime');
-  if ParamStr(2)<>'' then
-  begin
-    {$IFDEF UseMpvVideo}
-    // First, so that no video has drawn before the reference menu.
-    TestMenuAfterVideo;
-    {$ENDIF}
-    TestVideoSelection;
-    TestVideo('FFmpeg_Video');
-    {$IFDEF UseMpvVideo}
-    TestVideo('MPV_Video');
-    TestVideoStartup;
-    TestVideoFallback;
-    TestVideoWithoutFrame;
-    TestVideoPreview;
-    TestTwoPlayers;
-    TestOpenTimes;
-    {$ENDIF}
+    for I:=1 to 20 do
+    begin
+      A:=Renderer.CreateRenderTarget(31,17);
+      Require(A<>nil,'repeat target allocation');
+      A.Free; A:=nil;
+    end;
+    CheckError('target destruction');
+    ConsoleWriteLn('PASS ' + ModeName + ': offscreen texture output, state restoration, framebuffer separation and repeated lifetime');
+    if ParamStr(2)<>'' then
+    begin
+      {$IFDEF UseMpvVideo}
+      // First, so that no video has drawn before the reference menu.
+      TestMenuAfterVideo;
+      {$ENDIF}
+      TestVideoSelection;
+      TestVideo('FFmpeg_Video');
+      {$IFDEF UseMpvVideo}
+      TestVideo('MPV_Video');
+      TestVideoStartup;
+      TestVideoFallback;
+      TestVideoWithoutFrame;
+      TestMidstreamRenderFailure;
+      TestVideoPreview;
+      TestTwoPlayers;
+      TestOpenTimes;
+      {$ENDIF}
+    end;
   end;
   Renderer.Free; Renderer:=nil;
   SDL_DestroyWindow(Screen); Screen:=nil; SDL_Quit;
