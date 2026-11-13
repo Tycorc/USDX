@@ -44,6 +44,9 @@ if (-not $OutputDirectory) {
 if (Test-Path -LiteralPath $OutputDirectory) { throw 'Use a new output directory' }
 $output = (New-Item -ItemType Directory -Path $OutputDirectory).FullName
 Copy-Item -LiteralPath (Join-Path $bundle 'manifest.json') -Destination $output
+# Keep media beside the isolated runtime. A bundle on a WSL share must not
+# make local video-open measurements include reads through that share.
+Copy-Item -LiteralPath (Join-Path $bundle 'fixtures') -Destination (Join-Path $output 'fixtures') -Recurse
 $runtime = Join-Path $output 'runtime'
 Copy-Item -LiteralPath (Join-Path $bundle 'runtime') -Destination $runtime -Recurse
 $missingRuntime = Join-Path $output 'missing-runtime'
@@ -75,7 +78,7 @@ $result = [ordered]@{
 }
 $python = Join-Path $bundle 'python/python.exe'
 $runner = Join-Path $PSScriptRoot 'run-video-smoke.py'
-$fixture = Join-Path $bundle 'fixtures/quadrants.mp4'
+$fixture = Join-Path $output 'fixtures/quadrants.mp4'
 function Invoke-VideoTest([string]$Name, [string]$Executable, [string]$Decoder, [string[]]$SelectedRenderers, [bool]$RequireHardware, [int]$PacingDuration = 0, [string]$RuntimeDirectory = $runtime, [bool]$MissingMpv = $false) {
   $arguments = @('-B', $runner, '--prebuilt', (Join-Path $RuntimeDirectory $Executable),
                  '--fixture', $fixture, '--output-dir', (Join-Path $output $Name),
