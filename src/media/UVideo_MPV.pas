@@ -42,6 +42,9 @@ const
   requestSeek = 103;
   requestLoop = 104;
   requestHwdec = 105;
+  requestCodec = 106;
+  requestPark = 107;
+  requestDecoder = 108;
   openTimeout = 5.0;
   parkTimeout = 2.0;
   seekTimeout = 5.0;
@@ -97,10 +100,6 @@ type
       function SetOption(const Name, Value: AnsiString): boolean;
       function SetOptionIfKnown(const Name, Value: AnsiString): boolean;
       function Command(Id: QWord; const Args: array of AnsiString): boolean;
-      function CommandSync(const Args: array of AnsiString): boolean;
-      function GetStringProperty(const Name: AnsiString): string;
-      function GetInt64Property(const Name: AnsiString; out Value: Int64): boolean;
-      function GetDoubleProperty(const Name: AnsiString; out Value: double): boolean;
       procedure ReadInitialProperties;
       function Observe(Id: QWord; const Name: AnsiString; Format: cint): boolean;
       function CreatePlayer(): boolean;
@@ -108,7 +107,8 @@ type
       function AdoptParkedPlayer(): boolean;
       function ParkPlayer(): boolean;
       procedure RequestHardwareDecoding;
-      procedure RememberDecoder;
+      procedure SelectHardwareDecoder;
+      procedure RememberDecoder(Decoder: string);
       function EnsureTarget(): boolean;
       procedure ReadProperty(Event: Pmpv_event);
       procedure PumpEvents;
@@ -149,9 +149,11 @@ type
 var
   { One idle player outlives Close so the next Open reuses it instead of
     creating a player and a render context. Until the first frame is in the
-    texture, a new player took 630 to 1000 ms and a reused one 22 to 62 ms
-    (Windows, RTX 2080 SUPER, software decoding and nvdec). The smoke test
-    reports both times. }
+    texture, a new player took 554 to 792 ms and a reused one 26 to 48 ms on
+    Windows with an RTX 2080 SUPER, where most of the difference is libmpv
+    loading the hardware decoder interfaces with the render context. With
+    Intel UHD Graphics it was 248 to 339 ms against 27 to 58 ms. The smoke
+    test reports both times. }
   parkedHandle: Pmpv_handle;
   parkedContext: Pmpv_render_context;
   parkedTarget: TRenderTarget;
@@ -186,7 +188,7 @@ begin
   Result := string(mpv_error_string(Code));
 end;
 
-{ The nil-terminated argument list of mpv_command and mpv_command_async.
+{ The nil-terminated argument list of mpv_command_async.
   The entries point into Args, so Args must outlive every use of the list. }
 function MpvArgs(const Args: array of AnsiString): TMpvArgs;
 var
@@ -357,66 +359,18 @@ begin
     Fail('Cannot queue libmpv command: ' + MpvError(code));
 end;
 
-function TVideo_MPV.CommandSync(const Args: array of AnsiString): boolean;
-var
-  pointers: TMpvArgs;
-  code: cint;
-begin
-  pointers := MpvArgs(Args);
-  code := mpv_command(fHandle, @pointers[0]);
-  Result := code >= 0;
-  if not Result then
-    Fail('libmpv command failed: ' + MpvError(code));
-end;
-
-function TVideo_MPV.GetStringProperty(const Name: AnsiString): string;
-var
-  value: PAnsiChar;
-begin
-  Result := '';
-  value := nil;
-  if (mpv_get_property(fHandle, PAnsiChar(Name), MPV_FORMAT_STRING, @value) >= 0) and
-     (value <> nil) then
-  begin
-    Result := string(value);
-    mpv_free(value);
-  end;
-end;
-
-function TVideo_MPV.GetInt64Property(const Name: AnsiString; out Value: Int64): boolean;
-begin
-  Value := 0;
-  Result := mpv_get_property(fHandle, PAnsiChar(Name), MPV_FORMAT_INT64, @Value) >= 0;
-end;
-
-function TVideo_MPV.GetDoubleProperty(const Name: AnsiString; out Value: double): boolean;
-begin
-  Value := 0;
-  Result := mpv_get_property(fHandle, PAnsiChar(Name), MPV_FORMAT_DOUBLE, @Value) >= 0;
-end;
-
 { A reused player sends no change event for a value equal to the previous
-  file's, so the first values are read once playback has started. }
+  file's, so the first values are asked for once playback has started. They
+  arrive as replies carrying the observers' ids, which ReadProperty handles.
+  A synchronous read would wait for mpv's core, and after the first frame
+  the core can be waiting up to 200 ms for this thread to render. }
 procedure TVideo_MPV.ReadInitialProperties;
-var
-  size: Int64;
-  duration: double;
-  decoder: string;
 begin
   fInitialRead := true;
-  if GetInt64Property('dwidth', size) and (size > 0) and (size <= High(integer)) then
-    fVideoWidth := size;
-  if GetInt64Property('dheight', size) and (size > 0) and (size <= High(integer)) then
-    fVideoHeight := size;
-  if GetDoubleProperty('duration', duration) and not IsNan(duration) and
-     not IsInfinite(duration) and (duration >= 0) then
-    fDuration := duration;
-  decoder := GetStringProperty('hwdec-current');
-  if (decoder <> '') and (decoder <> fHardwareDecoder) then
-  begin
-    fHardwareDecoder := decoder;
-    fLoggedDecoder := false;
-  end;
+  mpv_get_property_async(fHandle, propertyWidth, 'dwidth', MPV_FORMAT_INT64);
+  mpv_get_property_async(fHandle, propertyHeight, 'dheight', MPV_FORMAT_INT64);
+  mpv_get_property_async(fHandle, propertyDuration, 'duration', MPV_FORMAT_DOUBLE);
+  mpv_get_property_async(fHandle, propertyHardwareDecoder, 'hwdec-current', MPV_FORMAT_STRING);
 end;
 
 function TVideo_MPV.Observe(Id: QWord; const Name: AnsiString; Format: cint): boolean;
@@ -575,31 +529,52 @@ begin
 end;
 
 function TVideo_MPV.ParkPlayer(): boolean;
+const
+  parkCommands = 5; // the commands queued below
 var
   event: Pmpv_event;
   deadline: double;
+  replies: integer;
+  ended, refused: boolean;
 begin
   Result := false;
   if (parkedHandle <> nil) or fFailed or not fOpened or
      (fHandle = nil) or (fContext = nil) or (fTarget = nil) then
     Exit;
-  mpv_render_context_set_update_callback(fContext, nil, nil);
-  if not (CommandSync(['stop']) and
-          CommandSync(['set', 'pause', 'yes']) and
-          CommandSync(['set', 'speed', '1']) and
-          CommandSync(['set', 'loop-file', 'no']) and
-          CommandSync(['set', 'hwdec', 'no'])) then
+  { Queued, not synchronous. A synchronous call waits for mpv's core, and the
+    core can itself wait up to 200 ms for this thread to render a frame the
+    video output has queued. The loop keeps rendering until all replies and
+    the END_FILE of stop are in: stop unloads the file asynchronously, and
+    its END_FILE must not reach the next video, which would read it as a
+    failed load. }
+  if not (Command(requestPark, ['stop']) and
+          Command(requestPark, ['set', 'pause', 'yes']) and
+          Command(requestPark, ['set', 'speed', '1']) and
+          Command(requestPark, ['set', 'loop-file', 'no']) and
+          Command(requestPark, ['set', 'hwdec', 'no'])) then
     Exit;
-  { stop unloads the file asynchronously. Its END_FILE must not reach the
-    next video, which would read it as a failed load. }
+  replies := 0;
+  ended := false;
+  refused := false;
   deadline := MonotonicTime + parkTimeout;
   repeat
-    event := mpv_wait_event(fHandle, 0.05);
-    if event^.event_id = MPV_EVENT_END_FILE then
-      Break;
-  until MonotonicTime >= deadline;
-  if event^.event_id <> MPV_EVENT_END_FILE then
+    fRenderPending := true;
+    RenderFrame;
+    event := mpv_wait_event(fHandle, 0.002);
+    case event^.event_id of
+      MPV_EVENT_END_FILE:
+        ended := true;
+      MPV_EVENT_COMMAND_REPLY:
+        if event^.reply_userdata = requestPark then
+        begin
+          Inc(replies);
+          refused := refused or (event^.error < 0);
+        end;
+    end;
+  until (ended and (replies = parkCommands)) or fFailed or (MonotonicTime >= deadline);
+  if not ended or (replies <> parkCommands) or refused or fFailed then
     Exit;
+  mpv_render_context_set_update_callback(fContext, nil, nil);
   repeat
     event := mpv_wait_event(fHandle, 0);
   until event^.event_id = MPV_EVENT_NONE;
@@ -614,17 +589,32 @@ begin
   Result := true;
 end;
 
+{ Asks for the codec name; SelectHardwareDecoder runs when the reply arrives.
+  A synchronous read here would wait for mpv's core, which after the first
+  frame of a new player can be waiting up to 200 ms for this thread to
+  render. }
 procedure TVideo_MPV.RequestHardwareDecoding;
+var
+  code: cint;
+begin
+  if fDecoderSwitchSent or (Ini.VideoHardwareDecoding = 'no') then
+    Exit;
+  fDecoderSwitchSent := true;
+  code := mpv_get_property_async(fHandle, requestCodec, 'video-codec', MPV_FORMAT_STRING);
+  if code < 0 then
+  begin
+    fDecoderProbed := true;
+    Log.LogWarn('Cannot read the video codec: ' + MpvError(code), 'TVideo_MPV');
+  end;
+end;
+
+procedure TVideo_MPV.SelectHardwareDecoder;
 var
   wanted: AnsiString;
   value: PAnsiChar;
   index: integer;
   code: cint;
 begin
-  if fDecoderSwitchSent or (Ini.VideoHardwareDecoding = 'no') then
-    Exit;
-  fDecoderSwitchSent := true;
-  fCodec := GetStringProperty('video-codec');
   index := rememberedDecoders.IndexOfName(fCodec);
   if index >= 0 then
   begin
@@ -650,22 +640,19 @@ end;
 
 { The decoder switch ends with a refresh seek; its PLAYBACK_RESTART means the
   new decoder produced a frame. Observed hwdec-current may still be queued
-  behind that event, so the final value is read directly. }
-procedure TVideo_MPV.RememberDecoder;
-var
-  decoder: string;
+  behind that event, so PumpEvents asks for the final value and passes the
+  reply here. }
+procedure TVideo_MPV.RememberDecoder(Decoder: string);
 begin
-  fDecoderProbed := true;
-  decoder := GetStringProperty('hwdec-current');
-  if decoder = '' then
-    decoder := 'no';
-  if decoder <> fHardwareDecoder then
+  if Decoder = '' then
+    Decoder := 'no';
+  if Decoder <> fHardwareDecoder then
   begin
-    fHardwareDecoder := decoder;
+    fHardwareDecoder := Decoder;
     fLoggedDecoder := false;
   end;
   if fCodec <> '' then
-    rememberedDecoders.Values[fCodec] := decoder;
+    rememberedDecoders.Values[fCodec] := Decoder;
 end;
 
 function TVideo_MPV.EnsureTarget(): boolean;
@@ -767,6 +754,8 @@ var
   event: Pmpv_event;
   message: Pmpv_event_log_message;
   ended: Pmpv_event_end_file;
+  reply: Pmpv_event_property;
+  text: string;
 begin
   if fHandle = nil then
     Exit;
@@ -791,7 +780,11 @@ begin
         if fSeekNotified then
           fSeeking := false;
         if fDecoderSwitchReplied and not fDecoderProbed then
-          RememberDecoder;
+        begin
+          fDecoderProbed := true;
+          if mpv_get_property_async(fHandle, requestDecoder, 'hwdec-current', MPV_FORMAT_STRING) < 0 then
+            RememberDecoder('');
+        end;
       end;
       MPV_EVENT_COMMAND_REPLY:
       begin
@@ -806,6 +799,24 @@ begin
           end;
         end;
       end;
+      MPV_EVENT_GET_PROPERTY_REPLY:
+        if (event^.reply_userdata = requestCodec) or (event^.reply_userdata = requestDecoder) then
+        begin
+          reply := event^.data;
+          text := '';
+          if (event^.error >= 0) and (reply <> nil) and (reply^.format = MPV_FORMAT_STRING) and
+             (reply^.data <> nil) and (mpv.PPAnsiChar(reply^.data)^ <> nil) then
+            text := string(mpv.PPAnsiChar(reply^.data)^);
+          if event^.reply_userdata = requestCodec then
+          begin
+            fCodec := text;
+            SelectHardwareDecoder;
+          end
+          else
+            RememberDecoder(text);
+        end
+        else if event^.error >= 0 then
+          ReadProperty(event);
       MPV_EVENT_SET_PROPERTY_REPLY:
       begin
         if event^.reply_userdata = requestHwdec then
