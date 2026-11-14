@@ -1,10 +1,13 @@
 { Renderer and video integration checks. run-video-smoke.py supplies the
   application's unit list so this tests the real backends without the UI.
+  Arguments: <renderer> [<fixture> <hwdec> [missing-mpv]].
   Distributed under the GNU General Public License, version 2 or later. }
 
 type
   // Disable one renderer capability to exercise the real backend fallback path.
   TRendererTestAccess = class(TRenderer_OpenGLBase);
+  TScreenPixels = array[0..64*32*4-1] of byte;
+  TProviderList = array of IInterface;
 
 var
   Context: TSDL_GLContext;
@@ -47,11 +50,41 @@ begin
   if Video<>nil then Result:=(Video as TObject).ClassName;
 end;
 
+// Leave only the video providers registered, in the application's order, so
+// that InitializeVideo runs its real selection without starting visualizers.
+procedure KeepVideoProvidersOnly(out Saved: TProviderList; out FFmpegProvider, MpvProvider: IVideoPlayback);
+var I: integer;
+begin
+  FFmpegProvider:=FindVideoProvider('FFmpeg_Video');
+  MpvProvider:=FindVideoProvider('MPV_Video');
+  Require(FFmpegProvider<>nil,'missing FFmpeg provider');
+  SetLength(Saved,MediaManager.Count);
+  for I:=0 to MediaManager.Count-1 do Saved[I]:=MediaManager[I];
+  MediaManager.Clear;
+  if MpvProvider<>nil then MediaManager.Add(MpvProvider);
+  MediaManager.Add(FFmpegProvider);
+end;
+
+procedure RestoreProviders(const Saved: TProviderList; const MpvProvider: IVideoPlayback);
+var I: integer;
+begin
+  if MpvProvider<>nil then MpvProvider.Finalize;
+  MediaManager.Clear;
+  for I:=0 to High(Saved) do MediaManager.Add(Saved[I]);
+end;
+
+procedure RequireSamePixels(const Expected, Actual: TScreenPixels; const Where: string);
+var I: integer;
+begin
+  for I:=0 to High(Expected) do
+    Require(Expected[I]=Actual[I],Where+': pixel '+IntToStr(I div 4 mod 64)+','+IntToStr(I div 256)+
+      ' channel '+IntToStr(I mod 4)+' is '+IntToStr(Actual[I])+', expected '+IntToStr(Expected[I]));
+end;
+
 procedure TestVideoSelection;
 var
-  SavedProviders: array of IInterface;
+  Saved: TProviderList;
   FFmpegProvider, MpvProvider: IVideoPlayback;
-  I: integer;
 
   procedure ExpectBackend(const Backend, VideoType: string);
   var Video: IVideo;
@@ -65,17 +98,8 @@ var
 
 begin
   ConsoleWriteLn('Testing configured video provider selection');
-  FFmpegProvider:=FindVideoProvider('FFmpeg_Video');
-  MpvProvider:=FindVideoProvider('MPV_Video');
-  Require(FFmpegProvider<>nil,'missing FFmpeg provider');
-  SetLength(SavedProviders,MediaManager.Count);
-  for I:=0 to MediaManager.Count-1 do
-    SavedProviders[I]:=MediaManager[I];
+  KeepVideoProvidersOnly(Saved,FFmpegProvider,MpvProvider);
   try
-    // Exercise the application's selector without initializing visualizers.
-    MediaManager.Clear;
-    if MpvProvider<>nil then MediaManager.Add(MpvProvider);
-    MediaManager.Add(FFmpegProvider);
     {$IFDEF UseMpvVideo}
     Ini.VideoBackend:='ffmpeg';
     {$ENDIF}
@@ -93,10 +117,7 @@ begin
     ExpectBackend('ffmpeg','TVideo_FFmpeg');
     {$ENDIF}
   finally
-    if MpvProvider<>nil then MpvProvider.Finalize;
-    MediaManager.Clear;
-    for I:=0 to High(SavedProviders) do
-      MediaManager.Add(SavedProviders[I]);
+    RestoreProviders(Saved,MpvProvider);
     {$IFDEF UseMpvVideo}
     Ini.VideoBackend:='mpv';
     {$ENDIF}
@@ -211,7 +232,165 @@ begin
   ConsoleWriteLn('PASS ' + ProviderName + ': orientation, advance, pause, seek, loop, EOF, destruction');
 end;
 
-{$I VideoMenuCache.inc}
+{ The shared menu background: real menu objects, their cache and both backends. }
+{$IFDEF UseMpvVideo}
+type
+  TMenuMpvSetProperty = function(Handle: Pmpv_handle; ReplyUserdata: UInt64;
+    Name: PAnsiChar; Format: longint; Data: Pointer): longint; cdecl;
+var
+  MenuOriginalSetProperty: TMenuMpvSetProperty;
+  MenuUnpauseSubmitted: boolean;
+
+function ObserveMenuSetProperty(Handle: Pmpv_handle; ReplyUserdata: UInt64;
+  Name: PAnsiChar; Format: longint; Data: Pointer): longint; cdecl;
+begin
+  // Observe the real request without changing, dropping or delaying it.
+  Result:=MenuOriginalSetProperty(Handle,ReplyUserdata,Name,Format,Data);
+  if (Result>=0) and (Name<>nil) and (Data<>nil) and
+     (string(Name)='pause') and (Format=MPV_FORMAT_FLAG) and
+     (PLongint(Data)^=0) then MenuUnpauseSubmitted:=true;
+end;
+{$ENDIF}
+
+procedure TestRetainedMenuVideo(const ProviderName: string);
+var
+  Provider: IVideoPlayback;
+  {$IFDEF UseMpvVideo}
+  SavedBackend: string;
+  {$ENDIF}
+  SavedSkin, TestSkin: TSkin;
+  SavedThemePaths: IInterfaceList;
+  Settings: TThemeBackground;
+  FileName: IPath;
+  First, Second: TMenuBackgroundVideo;
+
+  procedure DrawMenuVideo(Menu: TMenuBackgroundVideo);
+  begin
+    Renderer.SetClearColor(0.5,0.5,0.5,1);
+    Renderer.ClearFrameBuffer(CLEAR_COLOR);
+    Menu.Draw;
+    CheckError('retained menu video '+ProviderName);
+  end;
+
+  procedure PumpMenu(Menu: TMenuBackgroundVideo; Milliseconds: cardinal);
+  var Started: cardinal;
+  begin
+    Started:=SDL_GetTicks;
+    repeat
+      DrawMenuVideo(Menu);
+      SDL_PumpEvents;
+      SDL_Delay(10);
+    until SDL_GetTicks-Started>=Milliseconds;
+  end;
+
+  procedure HideAfterUnpause;
+  {$IFDEF UseMpvVideo}
+  var Started: cardinal;
+  {$ENDIF}
+  begin
+    {$IFDEF UseMpvVideo}
+    if ProviderName='MPV_Video' then
+    begin
+      Require(Assigned(mpv_set_property_async),'missing MPV property binding');
+      MenuOriginalSetProperty:=mpv_set_property_async;
+      MenuUnpauseSubmitted:=false;
+      mpv_set_property_async:=@ObserveMenuSetProperty;
+      try
+        First.OnShow;
+        Started:=SDL_GetTicks;
+        repeat
+          DrawMenuVideo(First);
+          if MenuUnpauseSubmitted then Break;
+          SDL_Delay(10);
+        until SDL_GetTicks-Started>=250;
+        Require(MenuUnpauseSubmitted,'menu did not submit an MPV unpause');
+        // No intervening GetFrame can consume this request's acknowledgment:
+        // the backend still has an unpause pending when the last user hides.
+        First.OnFinish;
+      finally
+        mpv_set_property_async:=MenuOriginalSetProperty;
+        MenuOriginalSetProperty:=nil;
+      end;
+      Exit;
+    end;
+    {$ENDIF}
+    First.OnShow;
+    PumpMenu(First,20);
+    First.OnFinish;
+  end;
+
+begin
+  ConsoleWriteLn('Testing retained menu video '+ProviderName);
+  // TestVideoSelection has initialized the application's selector. A backend
+  // setting change applies to its next Open, including menu constructors.
+  Provider:=VideoPlayback;
+  Require(Provider<>nil,'missing menu video provider');
+  {$IFDEF UseMpvVideo}
+  SavedBackend:=Ini.VideoBackend;
+  if ProviderName='FFmpeg_Video' then Ini.VideoBackend:='ffmpeg'
+  else Ini.VideoBackend:='mpv';
+  {$ENDIF}
+  Require(Provider.Init,'cannot initialize '+ProviderName+' for menu cache');
+  SavedSkin:=Skin;
+  SavedThemePaths:=ThemePaths;
+  TestSkin:=nil; First:=nil; Second:=nil;
+  ClearMenuVideoCache;
+  try
+    // TSkin.Create scans ThemePaths, which this program never fills: give it
+    // an empty list. The skin then only binds one texture name to the fixture.
+    ThemePaths:=TInterfaceList.Create;
+    TestSkin:=TSkin.Create;
+    ThemePaths:=SavedThemePaths;
+    Skin:=TestSkin;
+    FileName:=Path(ParamStr(2));
+    Skin.SetTextureEntry('VideoSmoke',FileName.GetName,FileName.GetPath);
+    Settings:=DEFAULT_BACKGROUND;
+    Settings.BGType:=bgtVideo;
+    Settings.Tex:='VideoSmoke';
+    First:=TMenuBackgroundVideo.Create(Settings);
+    Second:=TMenuBackgroundVideo.Create(Settings);
+    First.OnShow;
+    PumpMenu(First,350);
+    CheckVideoColors(0,ProviderName+' menu initial frame');
+    Second.OnShow;
+    PumpMenu(Second,900);
+    CheckVideoColors(1,ProviderName+' acquiring another menu must not pause');
+    First.OnFinish;
+    PumpMenu(Second,900);
+    CheckVideoColors(2,ProviderName+' releasing one menu must not pause another');
+
+    // Retain the same cached video while every user is hidden. In particular,
+    // do not call Draw/GetFrame, close the video or finalize its provider.
+    Second.OnFinish;
+    SDL_Delay(1100);
+    First.OnShow;
+    PumpMenu(First,200);
+    CheckVideoColors(2,ProviderName+' hidden cached menu advanced or reopened');
+    First.OnFinish;
+    SDL_Delay(50);
+    HideAfterUnpause;
+    SDL_Delay(1100);
+    First.OnShow;
+    PumpMenu(First,200);
+    CheckVideoColors(2,ProviderName+' immediately hidden menu advanced');
+    PumpMenu(First,850);
+    CheckVideoColors(3,ProviderName+' cached menu did not resume');
+  finally
+    First.Free;
+    Second.Free;
+    ClearMenuVideoCache;
+    Skin:=SavedSkin;
+    TestSkin.Free;
+    ThemePaths:=SavedThemePaths;
+    Provider.Finalize;
+    {$IFDEF UseMpvVideo}
+    Ini.VideoBackend:=SavedBackend;
+    {$ENDIF}
+  end;
+  CheckError('menu cache destruction '+ProviderName);
+  ConsoleWriteLn('PASS retained menu video '+ProviderName+
+    ': shared users, hidden cache, immediate hide and resumed playback');
+end;
 
 {$IFDEF UseMpvVideo}
 procedure TestVideoStartup;
@@ -375,9 +554,6 @@ begin
   ConsoleWriteLn('PASS in-memory preview: FFmpeg plays the snapshot to its end, the file stays replaceable');
 end;
 
-type
-  TScreenPixels = array[0..64*32*4-1] of byte;
-
 // Menu content drawn with the renderer calls menus use, read back from the window.
 procedure DrawMenu(Texture: TTexture; out Pixels: TScreenPixels);
 begin
@@ -389,14 +565,6 @@ begin
   Renderer.DrawQuad(20,8,0,40,16,1,0.5,0,0.6);
   glReadPixels(0,0,64,32,GL_RGBA,GL_UNSIGNED_BYTE,@Pixels[0]);
   CheckError('menu drawing');
-end;
-
-procedure CompareMenu(const Expected, Actual: TScreenPixels; const Where: string);
-var I: integer;
-begin
-  for I:=0 to High(Expected) do
-    Require(Expected[I]=Actual[I],Where+': pixel '+IntToStr(I div 4 mod 64)+','+IntToStr(I div 256)+
-      ' channel '+IntToStr(I mod 4)+' is '+IntToStr(Actual[I])+', expected '+IntToStr(Expected[I]));
 end;
 
 procedure TestMenuAfterVideo;
@@ -424,11 +592,11 @@ begin
     // Closing parks the player with its render target.
     Video:=nil;
     DrawMenu(Texture,Actual);
-    CompareMenu(Expected,Actual,'menu after closing an MPV video');
+    RequireSamePixels(Expected,Actual,'menu after closing an MPV video');
     // Finalize frees the parked player and its target.
     Provider.Finalize;
     DrawMenu(Texture,Actual);
-    CompareMenu(Expected,Actual,'menu after finalizing the MPV provider');
+    RequireSamePixels(Expected,Actual,'menu after finalizing the MPV provider');
   finally
     Texture.Free;
   end;
@@ -473,45 +641,145 @@ begin
   ConsoleWriteLn('PASS two MPV players: both play their own position, close in either order');
 end;
 
-// Output only: software rendering says little about a real GPU.
+// Report how long an open takes with a new player and with the player the
+// previous video parked. An open returns once the first frame is in the video
+// texture. Output only, no thresholds: software rendering says little about a
+// GPU. The runner checks every label against the backend's own log line.
 procedure TestOpenTimes;
-var Provider: IVideoPlayback; Video: IVideo;
+var Provider: IVideoPlayback; Cycle: integer;
 
-  function TimedOpen(const FileName: IPath; const Name: string): IVideo;
-  var Started: UInt64;
+  // The video is a local, so it is closed, and its player parked, on return.
+  procedure TimedOpen(const Name: string);
+  var Video: IVideo; Started: UInt64;
   begin
     Started:=SDL_GetPerformanceCounter;
-    Result:=Provider.Open(FileName);
-    ConsoleWriteLn(Format('OPEN-TIME %s %.1f',
-      [Name,(SDL_GetPerformanceCounter-Started)*1000/SDL_GetPerformanceFrequency]));
+    Video:=Provider.Open(Path(ParamStr(2)));
+    ConsoleWriteLn('OPEN-TIME '+Name+' '+
+      IntToStr(Round((SDL_GetPerformanceCounter-Started)*1000/SDL_GetPerformanceFrequency)));
+    Require(VideoClass(Video)='TVideo_MPV',Name+' open gave '+VideoClass(Video));
   end;
 
 begin
   Provider:=FindVideoProvider('MPV_Video');
   Require(Provider<>nil,'missing MPV provider');
   ConsoleWriteLn('Measuring video open times');
-  // An MPV open returns once the first frame is in the video texture.
-  Provider.Finalize;
-  Require(Provider.Init,'cannot initialize MPV provider for open times');
-  Video:=TimedOpen(Path(ParamStr(2)),'fresh');
-  Require(VideoClass(Video)='TVideo_MPV','fresh open gave '+VideoClass(Video));
-  Video:=nil;
-  Video:=TimedOpen(Path(ParamStr(2)),'reused');
-  Require(VideoClass(Video)='TVideo_MPV','reused open gave '+VideoClass(Video));
-  Video:=nil;
-  Provider.Finalize;
-  Require(Provider.Init,'cannot initialize MPV provider again');
-  Video:=TimedOpen(Path(ParamStr(2)),'fresh-after-finalize');
-  Require(VideoClass(Video)='TVideo_MPV','open after finalize gave '+VideoClass(Video));
-  Video:=nil;
-  Video:=TimedOpen(Path(ParamStr(2)+'.corrupt'),'fallback-unreadable');
-  Require(Video=nil,'the unreadable file opened');
+  for Cycle:=1 to 3 do
+  begin
+    // Finalize frees a parked player, so the next open creates one.
+    Provider.Finalize;
+    Require(Provider.Init,'cannot initialize MPV provider for open times');
+    TimedOpen('fresh');
+    TimedOpen('reused');
+    TimedOpen('reused');
+  end;
   Provider.Finalize;
   CheckError('open time measurement');
   ConsoleWriteLn('PASS open times measured');
 end;
-{$I VideoFailure.inc}
-{$I VideoMissingMpv.inc}
+
+// A real failure after playback has started, not a decoder error or injected
+// state: the .oversize fixture changes its display width to 81920 after 1.5 s,
+// which no render target can hold.
+procedure TestMidstreamRenderFailure;
+var
+  Provider: IVideoPlayback; Video: IVideo;
+  LastFrame, CurrentFrame: TScreenPixels;
+  Started, Elapsed: cardinal;
+  I, Colored, Frames: integer;
+
+  procedure Capture(out Pixels: TScreenPixels);
+  begin
+    Renderer.SetClearColor(0.5,0.5,0.5,1);
+    Renderer.ClearFrameBuffer(CLEAR_COLOR);
+    Video.Draw;
+    glReadPixels(0,0,64,32,GL_RGBA,GL_UNSIGNED_BYTE,@Pixels[0]);
+    CheckError('mid-stream failure draw');
+  end;
+
+begin
+  ConsoleWriteLn('Testing real mid-stream render-target failure');
+  Require(Renderer.MaxTextureSize<81920,
+    'mid-stream fixture needs a maximum texture width below 81920');
+  Provider:=FindVideoProvider('MPV_Video');
+  Require(Provider<>nil,'missing MPV provider for mid-stream failure');
+  Require(Provider.Init,'cannot initialize MPV for mid-stream failure');
+  Video:=nil;
+  try
+    Video:=Provider.Open(Path(ParamStr(2)+'.oversize'));
+    Require(VideoClass(Video)='TVideo_MPV','mid-stream fixture opened '+VideoClass(Video));
+    Require(not Video.Finished,'mid-stream fixture was already finished at open');
+    Capture(LastFrame);
+    Colored:=0;
+    for I:=0 to 64*32-1 do
+      if (Abs(integer(LastFrame[I*4])-integer(LastFrame[I*4+1]))>80) or
+         (Abs(integer(LastFrame[I*4+1])-integer(LastFrame[I*4+2]))>80) then Inc(Colored);
+    Require(Colored>100,'mid-stream fixture has no decoded colored initial frame');
+    Video.Play;
+    Started:=SDL_GetTicks; Frames:=0;
+    repeat
+      Elapsed:=SDL_GetTicks-Started;
+      Video.GetFrame(Elapsed/1000);
+      if Video.Finished then Break;
+      Capture(LastFrame);
+      Inc(Frames);
+      SDL_PumpEvents;
+      SDL_Delay(10);
+    until Elapsed>=5000;
+    Require(Video.Finished,'mid-stream render-target failure did not finish within five seconds');
+    Require(Frames>2,'mid-stream fixture failed before sustained playback');
+    Capture(CurrentFrame);
+    RequireSamePixels(LastFrame,CurrentFrame,'last frame after the mid-stream failure');
+    // Calls after the terminal state must remain harmless and retain that image.
+    Video.GetFrame(Elapsed/1000+1);
+    Require(Video.Finished,'mid-stream failure stopped reporting Finished');
+    Capture(CurrentFrame);
+    RequireSamePixels(LastFrame,CurrentFrame,'image after a GetFrame that follows the failure');
+  finally
+    Video:=nil;
+    Provider.Finalize;
+  end;
+  CheckError('mid-stream failure destruction');
+  ConsoleWriteLn('PASS mid-stream render-target failure: Finished, last frame retained, safe drawing and destruction');
+end;
+
+// Run in a fresh process without a loadable libmpv: the MPV-enabled build
+// must play files and snapshots through FFmpeg. The runner also requires
+// exactly one missing-library warning, rather than one per open.
+procedure TestMissingMpv;
+var
+  Saved: TProviderList;
+  MpvProvider, FFmpegProvider: IVideoPlayback;
+  Video: IVideo;
+  I: integer;
+begin
+  ConsoleWriteLn('Testing missing libmpv fallback');
+  KeepVideoProvidersOnly(Saved,FFmpegProvider,MpvProvider);
+  try
+    Ini.VideoBackend:='mpv';
+    InitializeVideo;
+    Require(VideoPlayback=MpvProvider,'missing-runtime selection did not choose the optional provider');
+    for I:=1 to 2 do
+    begin
+      Video:=VideoPlayback.Open(Path(ParamStr(2)));
+      Require(VideoClass(Video)='TVideo_FFmpeg','missing-runtime file opened '+VideoClass(Video));
+      WaitFirstVideoFrame(Video,'missing-runtime file '+IntToStr(I));
+      Video:=nil;
+      CheckError('missing-runtime file closed');
+    end;
+    Video:=VideoPlayback.Open(Path(ParamStr(2)),ReadBytes(ParamStr(2)));
+    Require(VideoClass(Video)='TVideo_FFmpeg','missing-runtime snapshot opened '+VideoClass(Video));
+    WaitFirstVideoFrame(Video,'missing-runtime snapshot');
+    Video.Play;
+    PumpVideo(Video,0,1400,true);
+    CheckVideoColors(1,'missing-runtime snapshot playback');
+    Video:=nil;
+    CheckError('missing-runtime snapshot closed');
+  finally
+    Video:=nil;
+    RestoreProviders(Saved,MpvProvider);
+  end;
+  ConsoleWriteLn('PASS missing libmpv fallback: repeated files and an in-memory snapshot play through FFmpeg');
+end;
 {$ENDIF}
 
 procedure Run;
@@ -551,7 +819,7 @@ begin
   Renderer.Blend:=false;
   Renderer.ScissorTest:=false;
   CheckError('renderer initialized');
-  if ParamStr(5)='missing-mpv' then
+  if ParamStr(4)='missing-mpv' then
   begin
     {$IFDEF UseMpvVideo}
     TestMissingMpv;
