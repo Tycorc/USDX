@@ -975,6 +975,7 @@ end;
 procedure InitializeSound;
 var
   i: integer;
+  DiagScanMode: TAudioInputScanMode;
   InterfaceList: TInterfaceList;
   CurrentAudioDecoder: IAudioDecoder;
   CurrentAudioPlayback: IAudioPlayback;
@@ -1020,7 +1021,13 @@ begin
   for i := 0 to InterfaceList.Count-1 do
   begin
     CurrentAudioInput := InterfaceList[i] as IAudioInput;
-    if (CurrentAudioInput.InitializeRecord(aimFast)) then
+    // Fork-only diagnostics: USCE_AUDIO_FULL_SCAN=1 probes every input device,
+    // so an unattended run can read the device names from the saved config.
+    if GetEnvironmentVariable('USCE_AUDIO_FULL_SCAN') <> '' then
+      DiagScanMode := aimFull
+    else
+      DiagScanMode := aimFast;
+    if (CurrentAudioInput.InitializeRecord(DiagScanMode)) then
     begin
       DefaultAudioInput := CurrentAudioInput;
       break;
