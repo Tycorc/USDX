@@ -155,11 +155,26 @@ var
   { hwdec-current per video codec for this session. mpv probes every decoder
     on every open; a codec the GPU cannot decode spent 10 s per open. }
   rememberedDecoders: TStringList;
+  { Fork-only diagnostics, not for upstream. USCE_MPV_DIAG=1 logs the phases
+    of each open and close. USCE_MPV_LOGFILE=<prefix> makes every new player
+    write mpv's own debug log to <prefix><n>.log. USCE_MPV_OPTS=name=value;...
+    sets extra options on every new player. }
+  diagEnabled: boolean;
+  diagLogPrefix, diagOptions: string;
+  diagPlayers: integer;
+
+function MonotonicTime: double;
+begin
+  Result := SDL_GetPerformanceCounter() / SDL_GetPerformanceFrequency();
+end;
 
 procedure DestroyParkedPlayer;
+var
+  started, contextFreed: double;
 begin
   if parkedHandle = nil then
     Exit;
+  started := MonotonicTime;
   parkedTarget.BeginRender;
   try
     mpv_render_context_free(parkedContext);
@@ -168,14 +183,13 @@ begin
   end;
   FreeAndNil(parkedTarget);
   parkedContext := nil;
+  contextFreed := MonotonicTime;
   mpv_terminate_destroy(parkedHandle);
   parkedHandle := nil;
   UnloadMpv;
-end;
-
-function MonotonicTime: double;
-begin
-  Result := SDL_GetPerformanceCounter() / SDL_GetPerformanceFrequency();
+  if diagEnabled then
+    Log.LogInfo(Format('DESTROY-PHASE context %.1f terminate %.1f ms',
+      [(contextFreed - started) * 1000, (MonotonicTime - contextFreed) * 1000]), 'TVideo_MPV');
 end;
 
 function MpvError(Code: cint): string;
@@ -429,6 +443,8 @@ end;
 function TVideo_MPV.CreatePlayer(): boolean;
 var
   code: cint;
+  extra: TStringList;
+  index: integer;
 begin
   Result := false;
   fHandle := mpv_create();
@@ -463,6 +479,30 @@ begin
           SetOption('video-timing-offset', '0') and
           SetOption('hwdec', 'no')) then
     Exit;
+
+  if diagLogPrefix <> '' then
+  begin
+    Inc(diagPlayers);
+    mpv_set_option_string(fHandle, 'log-file',
+      PAnsiChar(AnsiString(diagLogPrefix + IntToStr(diagPlayers) + '.log')));
+  end;
+  if diagOptions <> '' then
+  begin
+    extra := TStringList.Create;
+    try
+      extra.Delimiter := ';';
+      extra.StrictDelimiter := true;
+      extra.DelimitedText := diagOptions;
+      for index := 0 to extra.Count - 1 do
+      begin
+        code := mpv_set_option_string(fHandle, PAnsiChar(AnsiString(extra.Names[index])),
+          PAnsiChar(AnsiString(extra.ValueFromIndex[index])));
+        Log.LogInfo('DIAG option ' + extra[index] + ': ' + MpvError(code), 'TVideo_MPV');
+      end;
+    finally
+      extra.Free;
+    end;
+  end;
 
   code := mpv_initialize(fHandle);
   if code < 0 then
@@ -978,6 +1018,8 @@ function TVideo_MPV.Open(const FileName: IPath; const Media: TBytes = nil): bool
 var
   deadline: double;
   filenameUTF8: AnsiString;
+  diagStart, diagLibrary, diagPlayer, diagContext, diagLoaded, diagStarted: double;
+  diagNew: boolean;
 begin
   Close;
   ResetPresentation;
@@ -985,6 +1027,10 @@ begin
   { No in-memory input: TVideoPlayback_MPV.Open hands a snapshot to the fallback. }
   if Media <> nil then
     Exit;
+  diagStart := MonotonicTime;
+  diagNew := parkedHandle = nil;
+  diagLoaded := 0;
+  diagStarted := 0;
   if not AdoptParkedPlayer() then
   begin
     fLibraryLoaded := LoadMpv();
@@ -993,8 +1039,18 @@ begin
   end;
 
   try
-    if (fHandle = nil) and (not CreatePlayer() or not CreateContext()) then
-      Exit;
+    diagLibrary := MonotonicTime;
+    diagPlayer := diagLibrary;
+    diagContext := diagLibrary;
+    if fHandle = nil then
+    begin
+      if not CreatePlayer() then
+        Exit;
+      diagPlayer := MonotonicTime;
+      if not CreateContext() then
+        Exit;
+      diagContext := MonotonicTime;
+    end;
     filenameUTF8 := FileName.GetAbsolutePath().ToUTF8();
     if not Command(requestLoad, ['loadfile', filenameUTF8, 'replace']) then
       Exit;
@@ -1002,6 +1058,10 @@ begin
     deadline := MonotonicTime + openTimeout;
     repeat
       PumpEvents;
+      if fFileLoaded and (diagLoaded = 0) then
+        diagLoaded := MonotonicTime;
+      if fPlaybackStarted and (diagStarted = 0) then
+        diagStarted := MonotonicTime;
       if fFileLoaded and fPlaybackStarted and not fInitialRead then
         ReadInitialProperties;
       RenderFrame;
@@ -1010,6 +1070,13 @@ begin
       if fFileLoaded and fPlaybackStarted and fFrameTexValid then
       begin
         fOpened := true;
+        if diagEnabled then
+          Log.LogInfo(Format('OPEN-PHASE new %d: library %.1f player %.1f context %.1f ' +
+            'loaded %.1f started %.1f frame %.1f ms',
+            [Ord(diagNew), (diagLibrary - diagStart) * 1000, (diagPlayer - diagLibrary) * 1000,
+             (diagContext - diagPlayer) * 1000, (diagLoaded - diagContext) * 1000,
+             (diagStarted - diagLoaded) * 1000, (MonotonicTime - diagStarted) * 1000]),
+            'TVideo_MPV');
         Log.LogInfo('Using libmpv video (' + IntToStr(fVideoWidth) + 'x' +
           IntToStr(fVideoHeight) + ') for ' + FileName.ToUTF8(), 'TVideo_MPV');
         RequestHardwareDecoding;
@@ -1033,8 +1100,16 @@ begin
 end;
 
 procedure TVideo_MPV.Close;
+var
+  diagStart: double;
+  diagHad, diagParked: boolean;
 begin
-  ParkPlayer;
+  diagStart := MonotonicTime;
+  diagHad := fHandle <> nil;
+  diagParked := ParkPlayer;
+  if diagEnabled and diagHad then
+    Log.LogInfo(Format('CLOSE-PHASE parked %d: %.1f ms',
+      [Ord(diagParked), (MonotonicTime - diagStart) * 1000]), 'TVideo_MPV');
   if fContext <> nil then
   begin
     mpv_render_context_set_update_callback(fContext, nil, nil);
@@ -1201,6 +1276,9 @@ begin
 end;
 
 initialization
+  diagEnabled := GetEnvironmentVariable('USCE_MPV_DIAG') <> '';
+  diagLogPrefix := GetEnvironmentVariable('USCE_MPV_LOGFILE');
+  diagOptions := GetEnvironmentVariable('USCE_MPV_OPTS');
   rememberedDecoders := TStringList.Create;
   MediaManager.Insert(0, TVideoPlayback_MPV.Create);
 

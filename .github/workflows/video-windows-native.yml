@@ -4,7 +4,7 @@ name: MPV validation and native Windows bundle
 on:
   workflow_dispatch:
   push:
-    branches: [test/usce-mpv-native-20261113]
+    branches: [test/usce-mpv-native-20261113, test/usce-mpv-diag-20261114]
 
 permissions:
   contents: read

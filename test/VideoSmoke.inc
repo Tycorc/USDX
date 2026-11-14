@@ -646,7 +646,7 @@ end;
 // texture. Output only, no thresholds: software rendering says little about a
 // GPU. The runner checks every label against the backend's own log line.
 procedure TestOpenTimes;
-var Provider: IVideoPlayback; Cycle: integer;
+var Provider: IVideoPlayback; Cycle, Cycles, SettleMs, HoldMs: integer;
 
   // The video is a local, so it is closed, and its player parked, on return.
   procedure TimedOpen(const Name: string);
@@ -657,16 +657,27 @@ var Provider: IVideoPlayback; Cycle: integer;
     ConsoleWriteLn('OPEN-TIME '+Name+' '+
       IntToStr(Round((SDL_GetPerformanceCounter-Started)*1000/SDL_GetPerformanceFrequency)));
     Require(VideoClass(Video)='TVideo_MPV',Name+' open gave '+VideoClass(Video));
+    // Fork-only diagnostics: keep the video playing before it is closed.
+    if HoldMs>0 then
+    begin
+      Video.Play;
+      PumpVideo(Video,0,HoldMs,true);
+    end;
   end;
 
 begin
   Provider:=FindVideoProvider('MPV_Video');
   Require(Provider<>nil,'missing MPV provider');
   ConsoleWriteLn('Measuring video open times');
-  for Cycle:=1 to 3 do
+  // Fork-only diagnostics, see USCE_SMOKE_ONLY in Run.
+  Cycles:=StrToIntDef(GetEnvironmentVariable('USCE_OPEN_CYCLES'),3);
+  SettleMs:=StrToIntDef(GetEnvironmentVariable('USCE_OPEN_SETTLE_MS'),0);
+  HoldMs:=StrToIntDef(GetEnvironmentVariable('USCE_OPEN_HOLD_MS'),0);
+  for Cycle:=1 to Cycles do
   begin
     // Finalize frees a parked player, so the next open creates one.
     Provider.Finalize;
+    if SettleMs>0 then SDL_Delay(SettleMs);
     Require(Provider.Init,'cannot initialize MPV provider for open times');
     TimedOpen('fresh');
     TimedOpen('reused');
@@ -892,6 +903,12 @@ begin
     end;
     CheckError('target destruction');
     ConsoleWriteLn('PASS ' + ModeName + ': offscreen texture output, state restoration, framebuffer separation and repeated lifetime');
+    {$IFDEF UseMpvVideo}
+    // Fork-only diagnostics: USCE_SMOKE_ONLY=opentimes runs that test alone.
+    if GetEnvironmentVariable('USCE_SMOKE_ONLY')='opentimes' then
+      TestOpenTimes
+    else
+    {$ENDIF}
     if ParamStr(2)<>'' then
     begin
       {$IFDEF UseMpvVideo}
