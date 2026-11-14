@@ -72,9 +72,14 @@ var
   CaptureCount: longint;
   CaptureLast, CaptureMaxGap: UInt64;
 
+{ Till may lie before From: the capture thread writes its timestamp while the
+  main thread reads its own. Unsigned subtraction would overflow then. }
 function Ms(From, Till: UInt64): double;
 begin
-  Result := (Till - From) * 1000 / Frequency;
+  if Till >= From then
+    Result := (Till - From) * 1000 / Frequency
+  else
+    Result := -((From - Till) * 1000 / Frequency);
 end;
 
 function FrameTraceEnabled: boolean;
@@ -175,7 +180,7 @@ begin
   if not Enabled then
     Exit;
   now := SDL_GetPerformanceCounter;
-  if (CaptureLast <> 0) and (now - CaptureLast > CaptureMaxGap) then
+  if (CaptureLast <> 0) and (now > CaptureLast) and (now - CaptureLast > CaptureMaxGap) then
     CaptureMaxGap := now - CaptureLast;
   CaptureLast := now;
   InterlockedIncrement(CaptureCount);
@@ -198,10 +203,12 @@ begin
   gap := CaptureMaxGap;
   CaptureMaxGap := 0;
   last := CaptureLast;
-  if last <> 0 then
-    age := Ms(last, swapped)
+  if last = 0 then
+    age := -1
+  else if last >= swapped then
+    age := 0
   else
-    age := -1;
+    age := Ms(last, swapped);
   if HaveVideo then
     video := SysUtils.Format('%.6f,%.6f,%.3f,%d,%d',
       [VideoRequested, VideoSong, VideoGetFrameMs, VideoFrame, Ord(VideoPaused)], format)
