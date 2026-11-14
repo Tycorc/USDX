@@ -19,11 +19,13 @@ import argparse
 import os
 from pathlib import Path
 import re
-import runpy
 import shlex
 import shutil
 import subprocess
 import tempfile
+
+# Three times the slowest measured run of one renderer (57 s, Windows with MPV).
+RUN_TIMEOUT = 180
 
 
 def make_fixture(destination):
@@ -67,8 +69,74 @@ def make_fixture(destination):
         "-pix_fmt", "yuv420p", "-bsf:v", "filter_units=remove_types=5",
         "-f", "mp4", str(destination.with_suffix(destination.suffix + ".noframe"))
     ], input=frame * 10, check=True)
-    runpy.run_path(str(Path(__file__).with_name("video_failure_fixture.py")))["make_failure_fixture"](
-        destination.with_suffix(destination.suffix + ".oversize"))
+    make_failure_fixture(ffmpeg, destination.with_suffix(destination.suffix + ".oversize"))
+
+
+def make_failure_fixture(ffmpeg, path):
+    """Write MPEG-TS: 1.5 seconds at SAR 1:1, then 1.5 seconds at SAR 256:1.
+
+    Both segments decode 320x256 quadrants. The second one's display width is
+    81920, beyond GPU texture limits, so the renderer cannot allocate its
+    texture after playback has started. Concatenating the segments keeps the
+    SPS change that a remuxer would normalize away.
+    """
+    pattern = ("color=c=red:size=320x256:rate=24,"
+               "drawbox=x=160:y=0:w=160:h=128:color=0x00ff00:t=fill,"
+               "drawbox=x=0:y=128:w=160:h=128:color=blue:t=fill,"
+               "drawbox=x=160:y=128:w=160:h=128:color=yellow:t=fill")
+    with tempfile.TemporaryDirectory(prefix="video-sar-", dir=path.parent) as temporary:
+        segments = []
+        for index, sar in enumerate(("1/1", "256/1")):
+            segment = Path(temporary) / f"segment-{index}.ts"
+            subprocess.run([
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", pattern, "-t", "1.5",
+                "-vf", f"setsar={sar}:max=65535", "-an",
+                "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast",
+                "-g", "12", "-bf", "0", "-pix_fmt", "yuv420p",
+                "-muxdelay", "0", "-muxpreload", "0",
+                "-output_ts_offset", str(index * 1.5), str(segment),
+            ], check=True, timeout=30)
+            segments.append(segment.read_bytes())
+        path.write_bytes(b"".join(segments))
+
+
+def passed_section(output, start, end):
+    """The log between a test's start line and its PASS line, or None without both."""
+    _, started, rest = output.partition(start)
+    body, passed, _ = rest.partition(end)
+    return body if started and passed else None
+
+
+def has_errors(text):
+    return re.search(r"(?:ERROR|CRITICAL):", text) is not None
+
+
+def open_times(output):
+    """Open times in ms by label, each label checked against the backend's log.
+
+    The backend logs "Reusing libmpv player" when an open adopts the parked
+    player. A time labelled reused without that line, or labelled fresh with
+    it, would report something else than its name says.
+    """
+    section = passed_section(output, "Measuring video open times", "PASS open times measured")
+    if section is None:
+        raise RuntimeError("The open-time measurement did not complete")
+    times = {"fresh": [], "reused": []}
+    adopted = False
+    for line in section.splitlines():
+        if "Reusing libmpv player" in line:
+            adopted = True
+        match = re.match(r"OPEN-TIME (fresh|reused) (\d+)$", line)
+        if match:
+            if adopted != (match[1] == "reused"):
+                raise RuntimeError("An open time is labelled %s but the player was %s" % (
+                    match[1], "reused" if adopted else "new"))
+            times[match[1]].append(int(match[2]))
+            adopted = False
+    if len(times["fresh"]) != 3 or len(times["reused"]) != 6:
+        raise RuntimeError("Expected three fresh and six reused open times, got %r" % times)
+    return times
 
 
 def main():
@@ -85,10 +153,10 @@ def main():
     parser.add_argument("--output-dir", "--output-directory", type=Path)
     parser.add_argument("--hwdec", choices=["no", "auto", "auto-copy"], default="no")
     parser.add_argument("--require-hardware", action="store_true")
-    parser.add_argument("--expect-missing-mpv", action="store_true",
-                        help="test an MPV-enabled executable with no loadable libmpv")
     parser.add_argument("--pacing-seconds", type=int, default=0,
                         help="show a native video window and measure swap-loop intervals (10-120 seconds)")
+    parser.add_argument("--expect-missing-mpv", action="store_true",
+                        help="test an MPV-enabled executable with no loadable libmpv")
     args = parser.parse_args()
     if args.require_hardware and (args.hwdec == "no" or args.skip_video):
         parser.error("--require-hardware needs --hwdec auto or auto-copy and video tests")
@@ -194,7 +262,7 @@ def main():
         fixture = args.fixture or temp / "quadrants.mp4"
         if not args.skip_video and not args.fixture:
             make_fixture(fixture)
-        open_times = []
+        measured = []
         for renderer in args.renderers:
             environment = dict(os.environ)
             if renderer == "gl2":
@@ -206,10 +274,10 @@ def main():
             command = [str(executable), renderer]
             if not args.skip_video:
                 command.extend([str(fixture), args.hwdec])
-                if args.pacing_seconds or args.expect_missing_mpv:
-                    command.append(str(args.pacing_seconds))
                 if args.expect_missing_mpv:
                     command.append("missing-mpv")
+                elif args.pacing_seconds:
+                    command.append(str(args.pacing_seconds))
             print("Running", renderer, flush=True)
             # ConsoleWriteLn checks for a console window on Windows, including
             # when output is redirected. Keep that console hidden during tests.
@@ -220,89 +288,90 @@ def main():
                 startup.wShowWindow = subprocess.SW_HIDE
                 process_options = {"startupinfo": startup,
                                    "creationflags": subprocess.CREATE_NEW_CONSOLE}
-            result = subprocess.run(command, cwd=temp, env=environment,
-                                    capture_output=True, text=True, timeout=90 + args.pacing_seconds,
-                                    **process_options)
-            output = result.stdout + result.stderr
-            (temp / (renderer + ".log")).write_text(output)
+            # Both streams go straight to files, so a run that is cut off keeps
+            # its output. They stay separate: the libraries write to stderr
+            # unbuffered, which would land inside the test's buffered lines.
+            log = temp / (renderer + ".log")
+            errors_log = temp / (renderer + ".stderr.log")
+            with log.open("wb") as stream, errors_log.open("wb") as error_stream:
+                try:
+                    code = subprocess.run(command, cwd=temp, env=environment, stdout=stream,
+                                          stderr=error_stream,
+                                          timeout=RUN_TIMEOUT + args.pacing_seconds,
+                                          **process_options).returncode
+                except subprocess.TimeoutExpired:
+                    code = None
+            output = log.read_text(errors="replace") + errors_log.read_text(errors="replace")
             print(output, end="", flush=True)
-            result.check_returncode()
+            if code is None:
+                raise RuntimeError("%s did not finish within %d s" % (renderer, RUN_TIMEOUT))
+            if code != 0:
+                raise RuntimeError("%s exited with status %d" % (renderer, code))
             if args.expect_missing_mpv:
                 if ("PASS missing libmpv fallback:" not in output or
                         output.count("; FFmpeg plays all videos") != 1 or
-                        "Using libmpv video" in output or
-                        re.search(r"(?:ERROR|CRITICAL):", output)):
+                        "Using libmpv video" in output or has_errors(output)):
                     raise RuntimeError("Missing-libmpv fallback did not pass with one warning and no errors")
                 continue
-            if not args.skip_video:
-                selection, marker, _ = output.partition("PASS configured video provider selection")
-                if not marker or re.search(r"(?:ERROR|CRITICAL):", selection):
-                    raise RuntimeError("Configured video provider selection did not complete without errors")
-                for provider in ("FFmpeg_Video", "MPV_Video"):
-                    if provider == "MPV_Video" and "Testing MPV_Video" not in output:
-                        continue
-                    section, marker, _ = output.partition(
-                        "Testing retained menu video " + provider)[2].partition(
-                        "PASS retained menu video " + provider + ":")
-                    if not marker or re.search(r"(?:ERROR|CRITICAL):", section):
-                        raise RuntimeError("Retained menu cache test did not pass for " + provider)
-                    if provider == "MPV_Video" and section.count("Using libmpv video") != 1:
-                        raise RuntimeError("Retained menu cache test did not use exactly one MPV video")
-            for start, end in (("Testing in-memory preview", "PASS in-memory preview"),
-                               ("Testing two MPV players", "PASS two MPV players")):
-                section, marker, _ = output.partition(start)[2].partition(end)
-                if start in output and (not marker or re.search(r"(?:ERROR|CRITICAL):", section)):
-                    raise RuntimeError("Errors were logged between '%s' and its PASS line" % start)
-            if "Testing real mid-stream render-target failure" in output:
-                section, marker, _ = output.partition("Testing real mid-stream render-target failure")[2].partition("PASS mid-stream render-target failure:")
-                errors = re.findall(r"(?m)^ERROR:.*$", section)
-                if (not marker or len(errors) != 1 or
-                        "Cannot create libmpv video texture" not in errors[0] or "CRITICAL:" in section):
-                    raise RuntimeError("Mid-stream test did not finish with exactly the expected render-target error")
-            open_times.append((renderer, re.findall(r"(?m)^OPEN-TIME (\S+) (\S+)$", output)))
+            if args.skip_video:
+                continue
+            with_mpv = "Testing MPV_Video" in output
+            # Tests that must pass without logging an error.
+            clean = [("Testing configured video provider selection",
+                      "PASS configured video provider selection"),
+                     ("Testing retained menu video FFmpeg_Video", "PASS retained menu video FFmpeg_Video:")]
+            if with_mpv:
+                clean += [("Testing retained menu video MPV_Video", "PASS retained menu video MPV_Video:"),
+                          ("Testing menu drawing after libmpv", "PASS menu drawing after libmpv:"),
+                          ("Testing in-memory preview", "PASS in-memory preview:"),
+                          ("Testing two MPV players", "PASS two MPV players:")]
+            for start, end in clean:
+                section = passed_section(output, start, end)
+                if section is None or has_errors(section):
+                    raise RuntimeError("'%s' did not pass without errors" % start)
+            if not with_mpv:
+                continue
+            section = passed_section(output, "Testing retained menu video MPV_Video",
+                                     "PASS retained menu video MPV_Video:")
+            if section.count("Using libmpv video") != 1:
+                raise RuntimeError("The retained menu video was opened more than once")
+            section = passed_section(output, "Testing real mid-stream render-target failure",
+                                     "PASS mid-stream render-target failure:")
+            errors = re.findall(r"(?m)^ERROR:.*$", section or "")
+            if (section is None or len(errors) != 1 or
+                    "Cannot create libmpv video texture" not in errors[0] or "CRITICAL:" in section):
+                raise RuntimeError("Mid-stream test did not finish with exactly the expected render-target error")
             if output.count("Using libmpv video") < output.count("Testing MPV_Video"):
                 raise RuntimeError("The MPV playback test silently fell back to another backend")
-            if "Testing expected libmpv initialization failure" in output and \
-                    "Using fallback FFmpeg_Video" not in output:
+            measured.append((renderer, open_times(output)))
+            if "Using fallback FFmpeg_Video" not in output:
                 raise RuntimeError("The forced render-context failure did not use FFmpeg fallback")
-            if "Testing libmpv end without a video frame" in output and \
-                    "libmpv reached the end without a video frame" not in output:
+            if "libmpv reached the end without a video frame" not in output:
                 raise RuntimeError("libmpv did not reject a stream that ended without a frame")
-            if "Testing MPV_Video startup" in output:
-                for required in ("PASS in-memory preview:", "PASS menu drawing after libmpv:",
-                                 "PASS two MPV players:", "PASS open times measured",
-                                 "PASS mid-stream render-target failure:"):
-                    if required not in output:
-                        raise RuntimeError("Missing required MPV check: " + required)
-                if "Reusing libmpv player" not in output:
-                    raise RuntimeError("The libmpv player was not reused across opens")
-                if args.hwdec == "no":
-                    if "Probing hardware decoding for" in output:
-                        raise RuntimeError("Software decoding probed a hardware decoder")
-                else:
-                    if output.count("Probing hardware decoding for") != 1:
-                        raise RuntimeError("The hardware decoder was not probed exactly once per session")
-                    if "Using remembered decoder" not in output:
-                        raise RuntimeError("The probed decoder was not remembered for the next open")
+            if args.hwdec == "no":
+                if "Probing hardware decoding for" in output:
+                    raise RuntimeError("Software decoding probed a hardware decoder")
+            else:
+                if output.count("Probing hardware decoding for") != 1:
+                    raise RuntimeError("The hardware decoder was not probed exactly once per session")
+                if "Using remembered decoder" not in output:
+                    raise RuntimeError("The probed decoder was not remembered for the next open")
+            if args.require_hardware:
+                # The startup test closes players before their decoder switch.
+                # Inspect the playback test, which runs long enough to switch.
+                playback = passed_section(output, "Testing MPV_Video\n", "PASS MPV_Video:") or ""
+                decoders = re.findall(r"Hardware decoder: ([\w-]+)", playback)
+                if not decoders or decoders[-1] == "no":
+                    raise RuntimeError("MPV playback did not finish with an active hardware decoder")
+                if args.pacing_seconds:
+                    decoders = re.findall(r"Hardware decoder: ([\w-]+)", output.partition("PACING scope:")[2])
+                    if not decoders or decoders[-1] == "no":
+                        raise RuntimeError("Native pacing did not finish with an active hardware decoder")
             if args.pacing_seconds and "PASS native pacing" not in output:
                 raise RuntimeError("Native pacing measurement did not complete")
-            if args.require_hardware:
-                # Open-time measurements deliberately close the player before
-                # its asynchronous decoder switch. Inspect actual playback,
-                # not the final decoder log from those short opens.
-                playback, completed, _ = output.partition("Testing MPV_Video\n")[2].partition("PASS MPV_Video:")
-                sections = [("MPV playback", playback if completed else "")]
-                if args.pacing_seconds:
-                    sections.append(("native pacing", output.partition("PACING scope:")[2]))
-                for name, section in sections:
-                    decoders = re.findall(r"Hardware decoder: ([\w-]+)", section)
-                    if not decoders or decoders[-1] == "no":
-                        raise RuntimeError(name + " did not finish with an active hardware decoder")
-        if any(times for _, times in open_times):
-            # No thresholds: software rendering in CI says little about a GPU.
-            print("Open times in ms (MPV until the first frame; unreadable file until the fallback answers):")
-            for renderer, times in open_times:
-                print("  %s: %s" % (renderer, ", ".join("%s %s" % pair for pair in times)))
+        for renderer, times in measured:
+            print("Open times in ms, %s: new player %s, reused player %s" % (
+                renderer, times["fresh"], times["reused"]))
         success = True
     finally:
         if success and not (args.keep_temp or args.output_dir or args.build_only):
