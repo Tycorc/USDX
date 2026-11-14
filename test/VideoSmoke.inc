@@ -211,6 +211,8 @@ begin
   ConsoleWriteLn('PASS ' + ProviderName + ': orientation, advance, pause, seek, loop, EOF, destruction');
 end;
 
+{$I VideoMenuCache.inc}
+
 {$IFDEF UseMpvVideo}
 procedure TestVideoStartup;
 var Provider: IVideoPlayback; Video: IVideo; I: integer; Wait: cardinal;
@@ -629,8 +631,10 @@ begin
       {$ENDIF}
       TestVideoSelection;
       TestVideo('FFmpeg_Video');
+      TestRetainedMenuVideo('FFmpeg_Video');
       {$IFDEF UseMpvVideo}
       TestVideo('MPV_Video');
+      TestRetainedMenuVideo('MPV_Video');
       TestVideoStartup;
       TestVideoFallback;
       TestVideoWithoutFrame;

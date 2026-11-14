@@ -151,6 +151,9 @@ def main():
             # The test has no app icon/resources and must retain a console on Windows.
             header = re.sub(r"(?m)^\s*\{\$R [^\n]+\}\s*$", "", header)
             header = header.replace("program VideoSmoke;", "program VideoSmoke;\n{$DEFINE CONSOLE}")
+            # Menu-cache tests provide an empty theme path list. Keep cthreads
+            # first on Unix by adding Classes beside the other library units.
+            header = header.replace("  AnyAscii", "  Classes,\n  AnyAscii", 1)
             source_prefix = compiler_path(src)
             header = re.sub(
                 r"in '([^']+)'",
@@ -230,6 +233,16 @@ def main():
                 selection, marker, _ = output.partition("PASS configured video provider selection")
                 if not marker or re.search(r"(?:ERROR|CRITICAL):", selection):
                     raise RuntimeError("Configured video provider selection did not complete without errors")
+                for provider in ("FFmpeg_Video", "MPV_Video"):
+                    if provider == "MPV_Video" and "Testing MPV_Video" not in output:
+                        continue
+                    section, marker, _ = output.partition(
+                        "Testing retained menu video " + provider)[2].partition(
+                        "PASS retained menu video " + provider + ":")
+                    if not marker or re.search(r"(?:ERROR|CRITICAL):", section):
+                        raise RuntimeError("Retained menu cache test did not pass for " + provider)
+                    if provider == "MPV_Video" and section.count("Using libmpv video") != 1:
+                        raise RuntimeError("Retained menu cache test did not use exactly one MPV video")
             for start, end in (("Testing in-memory preview", "PASS in-memory preview"),
                                ("Testing two MPV players", "PASS two MPV players")):
                 section, marker, _ = output.partition(start)[2].partition(end)

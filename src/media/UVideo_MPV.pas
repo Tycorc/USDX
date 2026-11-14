@@ -74,6 +74,7 @@ type
       fOpened, fFileLoaded, fFailed: boolean;
       fPlaybackStarted: boolean;
       fPaused, fStopped, fLoop: boolean;
+      fResumePending: boolean;
       fUpdatePending: longint;
       fRenderPending: boolean;
       fVideoWidth, fVideoHeight: integer;
@@ -1061,6 +1062,7 @@ begin
   fFailed := false;
   fPaused := false;
   fStopped := false;
+  fResumePending := false;
   fLoop := false;
   fUpdatePending := 0;
   fRenderPending := false;
@@ -1097,6 +1099,8 @@ end;
 
 procedure TVideo_MPV.Play;
 begin
+  if fPaused or fStopped then
+    fResumePending := true;
   fPaused := false;
   fStopped := false;
   fSync.Reset;
@@ -1111,7 +1115,9 @@ begin
     fDesiredPause := true;
     fDesiredSpeed := 1;
     ApplyControl;
-  end;
+  end
+  else
+    fResumePending := true;
 end;
 
 procedure TVideo_MPV.Stop;
@@ -1170,6 +1176,10 @@ begin
     Exit;
   PumpEvents;
   now := MonotonicTime;
+  { Event processing may have been suspended with the menu. Allow an earlier
+    seek to complete before submitting the resume position. }
+  if fResumePending then
+    fSeekStarted := now;
   if (fSeekPending or fSeeking) and (now - fSeekStarted >= seekTimeout) then
     Fail('Timed out seeking libmpv video');
 
@@ -1181,8 +1191,13 @@ begin
     fPosition := decision.Position;
     fDesiredPause := decision.Paused;
     fDesiredSpeed := decision.Speed;
-    if decision.Seek then
+    { A hidden cached menu does not pump events. Its pause can remain behind
+      an unacknowledged unpause, allowing the decoder to run ahead. Resume
+      at the caller's current (possibly looping) time instead of waiting for
+      that clock to catch up. Keep the control path asynchronous. }
+    if decision.Seek or fResumePending then
       QueueSeek(decision.Position);
+    fResumePending := false;
     ApplyControl;
   end;
   { Even a paused player must render its initial frame and seek results. }
