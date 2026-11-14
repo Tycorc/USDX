@@ -37,6 +37,7 @@ const
   MPV_EVENT_NONE = 0;
   MPV_EVENT_SHUTDOWN = 1;
   MPV_EVENT_LOG_MESSAGE = 2;
+  MPV_EVENT_GET_PROPERTY_REPLY = 3;
   MPV_EVENT_SET_PROPERTY_REPLY = 4;
   MPV_EVENT_COMMAND_REPLY = 5;
   MPV_EVENT_END_FILE = 7;
@@ -126,10 +127,11 @@ var
   mpv_initialize: function(Handle: Pmpv_handle): cint; cdecl;
   mpv_terminate_destroy: procedure(Handle: Pmpv_handle); cdecl;
   mpv_set_option_string: function(Handle: Pmpv_handle; Name, Value: PAnsiChar): cint; cdecl;
-  mpv_command: function(Handle: Pmpv_handle; Args: PPAnsiChar): cint; cdecl;
+  { Requests to a running player are bound in their asynchronous form only.
+    A synchronous call from the thread that renders waits for mpv's core,
+    which can itself wait up to 200 ms for that thread to render. }
   mpv_command_async: function(Handle: Pmpv_handle; ReplyUserdata: cuint64; Args: PPAnsiChar): cint; cdecl;
-  mpv_get_property: function(Handle: Pmpv_handle; Name: PAnsiChar; Format: cint; Data: Pointer): cint; cdecl;
-  mpv_free: procedure(Data: Pointer); cdecl;
+  mpv_get_property_async: function(Handle: Pmpv_handle; ReplyUserdata: cuint64; Name: PAnsiChar; Format: cint): cint; cdecl;
   mpv_set_property_async: function(Handle: Pmpv_handle; ReplyUserdata: cuint64; Name: PAnsiChar; Format: cint; Data: Pointer): cint; cdecl;
   mpv_observe_property: function(Handle: Pmpv_handle; ReplyUserdata: cuint64; Name: PAnsiChar; Format: cint): cint; cdecl;
   mpv_request_log_messages: function(Handle: Pmpv_handle; Level: PAnsiChar): cint; cdecl;
@@ -204,10 +206,8 @@ begin
     LoadSymbol('mpv_initialize', mpv_initialize) and
     LoadSymbol('mpv_terminate_destroy', mpv_terminate_destroy) and
     LoadSymbol('mpv_set_option_string', mpv_set_option_string) and
-    LoadSymbol('mpv_command', mpv_command) and
     LoadSymbol('mpv_command_async', mpv_command_async) and
-    LoadSymbol('mpv_get_property', mpv_get_property) and
-    LoadSymbol('mpv_free', mpv_free) and
+    LoadSymbol('mpv_get_property_async', mpv_get_property_async) and
     LoadSymbol('mpv_set_property_async', mpv_set_property_async) and
     LoadSymbol('mpv_observe_property', mpv_observe_property) and
     LoadSymbol('mpv_request_log_messages', mpv_request_log_messages) and
