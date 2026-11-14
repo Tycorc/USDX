@@ -44,6 +44,7 @@ const
   requestHwdec = 105;
   requestCodec = 106;
   requestPark = 107;
+  requestDecoder = 108;
   openTimeout = 5.0;
   parkTimeout = 2.0;
   seekTimeout = 5.0;
@@ -99,9 +100,6 @@ type
       function SetOption(const Name, Value: AnsiString): boolean;
       function SetOptionIfKnown(const Name, Value: AnsiString): boolean;
       function Command(Id: QWord; const Args: array of AnsiString): boolean;
-      function GetStringProperty(const Name: AnsiString): string;
-      function GetInt64Property(const Name: AnsiString; out Value: Int64): boolean;
-      function GetDoubleProperty(const Name: AnsiString; out Value: double): boolean;
       procedure ReadInitialProperties;
       function Observe(Id: QWord; const Name: AnsiString; Format: cint): boolean;
       function CreatePlayer(): boolean;
@@ -110,7 +108,7 @@ type
       function ParkPlayer(): boolean;
       procedure RequestHardwareDecoding;
       procedure SelectHardwareDecoder;
-      procedure RememberDecoder;
+      procedure RememberDecoder(Decoder: string);
       function EnsureTarget(): boolean;
       procedure ReadProperty(Event: Pmpv_event);
       procedure PumpEvents;
@@ -370,54 +368,18 @@ begin
     Fail('Cannot queue libmpv command: ' + MpvError(code));
 end;
 
-function TVideo_MPV.GetStringProperty(const Name: AnsiString): string;
-var
-  value: PAnsiChar;
-begin
-  Result := '';
-  value := nil;
-  if (mpv_get_property(fHandle, PAnsiChar(Name), MPV_FORMAT_STRING, @value) >= 0) and
-     (value <> nil) then
-  begin
-    Result := string(value);
-    mpv_free(value);
-  end;
-end;
-
-function TVideo_MPV.GetInt64Property(const Name: AnsiString; out Value: Int64): boolean;
-begin
-  Value := 0;
-  Result := mpv_get_property(fHandle, PAnsiChar(Name), MPV_FORMAT_INT64, @Value) >= 0;
-end;
-
-function TVideo_MPV.GetDoubleProperty(const Name: AnsiString; out Value: double): boolean;
-begin
-  Value := 0;
-  Result := mpv_get_property(fHandle, PAnsiChar(Name), MPV_FORMAT_DOUBLE, @Value) >= 0;
-end;
-
 { A reused player sends no change event for a value equal to the previous
-  file's, so the first values are read once playback has started. }
+  file's, so the first values are asked for once playback has started. They
+  arrive as replies carrying the observers' ids, which ReadProperty handles.
+  A synchronous read would wait for mpv's core, and after the first frame
+  the core can be waiting up to 200 ms for this thread to render. }
 procedure TVideo_MPV.ReadInitialProperties;
-var
-  size: Int64;
-  duration: double;
-  decoder: string;
 begin
   fInitialRead := true;
-  if GetInt64Property('dwidth', size) and (size > 0) and (size <= High(integer)) then
-    fVideoWidth := size;
-  if GetInt64Property('dheight', size) and (size > 0) and (size <= High(integer)) then
-    fVideoHeight := size;
-  if GetDoubleProperty('duration', duration) and not IsNan(duration) and
-     not IsInfinite(duration) and (duration >= 0) then
-    fDuration := duration;
-  decoder := GetStringProperty('hwdec-current');
-  if (decoder <> '') and (decoder <> fHardwareDecoder) then
-  begin
-    fHardwareDecoder := decoder;
-    fLoggedDecoder := false;
-  end;
+  mpv_get_property_async(fHandle, propertyWidth, 'dwidth', MPV_FORMAT_INT64);
+  mpv_get_property_async(fHandle, propertyHeight, 'dheight', MPV_FORMAT_INT64);
+  mpv_get_property_async(fHandle, propertyDuration, 'duration', MPV_FORMAT_DOUBLE);
+  mpv_get_property_async(fHandle, propertyHardwareDecoder, 'hwdec-current', MPV_FORMAT_STRING);
 end;
 
 function TVideo_MPV.Observe(Id: QWord; const Name: AnsiString; Format: cint): boolean;
@@ -713,13 +675,10 @@ end;
 
 { The decoder switch ends with a refresh seek; its PLAYBACK_RESTART means the
   new decoder produced a frame. Observed hwdec-current may still be queued
-  behind that event, so the final value is read directly. }
-procedure TVideo_MPV.RememberDecoder;
-var
-  decoder: string;
+  behind that event, so PumpEvents asks for the final value and passes the
+  reply here. }
+procedure TVideo_MPV.RememberDecoder(Decoder: string);
 begin
-  fDecoderProbed := true;
-  decoder := GetStringProperty('hwdec-current');
   if decoder = '' then
     decoder := 'no';
   if decoder <> fHardwareDecoder then
@@ -830,7 +789,8 @@ var
   event: Pmpv_event;
   message: Pmpv_event_log_message;
   ended: Pmpv_event_end_file;
-  codec: Pmpv_event_property;
+  reply: Pmpv_event_property;
+  text: string;
 begin
   if fHandle = nil then
     Exit;
@@ -855,7 +815,11 @@ begin
         if fSeekNotified then
           fSeeking := false;
         if fDecoderSwitchReplied and not fDecoderProbed then
-          RememberDecoder;
+        begin
+          fDecoderProbed := true;
+          if mpv_get_property_async(fHandle, requestDecoder, 'hwdec-current', MPV_FORMAT_STRING) < 0 then
+            RememberDecoder('');
+        end;
       end;
       MPV_EVENT_COMMAND_REPLY:
       begin
@@ -871,14 +835,23 @@ begin
         end;
       end;
       MPV_EVENT_GET_PROPERTY_REPLY:
-        if event^.reply_userdata = requestCodec then
+        if (event^.reply_userdata = requestCodec) or (event^.reply_userdata = requestDecoder) then
         begin
-          codec := event^.data;
-          if (event^.error >= 0) and (codec <> nil) and (codec^.format = MPV_FORMAT_STRING) and
-             (codec^.data <> nil) and (mpv.PPAnsiChar(codec^.data)^ <> nil) then
-            fCodec := string(mpv.PPAnsiChar(codec^.data)^);
-          SelectHardwareDecoder;
-        end;
+          reply := event^.data;
+          text := '';
+          if (event^.error >= 0) and (reply <> nil) and (reply^.format = MPV_FORMAT_STRING) and
+             (reply^.data <> nil) and (mpv.PPAnsiChar(reply^.data)^ <> nil) then
+            text := string(mpv.PPAnsiChar(reply^.data)^);
+          if event^.reply_userdata = requestCodec then
+          begin
+            fCodec := text;
+            SelectHardwareDecoder;
+          end
+          else
+            RememberDecoder(text);
+        end
+        else if event^.error >= 0 then
+          ReadProperty(event);
       MPV_EVENT_SET_PROPERTY_REPLY:
       begin
         if event^.reply_userdata = requestHwdec then
