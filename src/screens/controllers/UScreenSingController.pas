@@ -211,6 +211,8 @@ type
 
     procedure Finish; virtual;
     procedure Pause; // toggle pause
+    // Fork-only diagnostics: the scripted actions of UFrameTrace.
+    procedure DiagAction(Action: integer; Value: real);
     procedure UpdateMedleyStats(medley_end: boolean);
     procedure OnSentenceEnd(Track: integer; SentenceIndex: cardinal; OnlyPlayer: integer = -1);     // for linebonus + singbar
     procedure ClearVoiceLyrics;
@@ -252,6 +254,7 @@ uses
   UUnicodeUtils,
   UWebcam,
   UWebSDK,
+  UFrameTrace,
   Classes,
   Math;
 
@@ -648,6 +651,17 @@ begin
       end;
   end;
   Result := inherited ParseMouse(MouseButton, BtnDown, MouseX, MouseY);
+end;
+
+procedure TScreenSingController.DiagAction(Action: integer; Value: real);
+begin
+  case Action of
+    ftaPause: Pause;
+    ftaSeekRelative: SeekTo(EnsureRange(AudioPlayback.Position + Value, 0, LyricsState.TotalTime), false);
+    ftaSeekAbsolute: SeekTo(Value, false);
+    ftaRestart: SeekTo(fStartTime);
+    ftaQuit: Finish;
+  end;
 end;
 
 procedure TScreenSingController.SeekTo(Position: real; ResetScoring: boolean);

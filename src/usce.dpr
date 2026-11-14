@@ -186,6 +186,7 @@ uses
   URemoteOverlay    in 'base\URemoteOverlay.pas',
   UTime             in 'base\UTime.pas',
   UFramePacer       in 'base\UFramePacer.pas',
+  UFrameTrace       in 'base\UFrameTrace.pas',
   USong             in 'base\USong.pas',
   USongProblems     in 'base\USongProblems.pas',
   UFolderFilter     in 'base\UFolderFilter.pas',

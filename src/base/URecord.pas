@@ -250,6 +250,7 @@ implementation
 
 uses
   ULog,
+  UFrameTrace,
   UPhoneAudio,
   URemoteBridgeIPC,
   URemoteInput,
@@ -1104,6 +1105,8 @@ var
   SourcePtr:               PByte;
   DestPtr:                 PByte;
 begin
+  // Fork-only diagnostics, see UFrameTrace.
+  FrameTraceCapture;
   AudioFormat := InputDevice.AudioFormat;
   if (AudioFormat = nil) then
     Exit;

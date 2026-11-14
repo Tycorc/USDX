@@ -134,6 +134,7 @@ uses
   UPathUtils,
   UUnicodeUtils,
   UScreenSingController,
+  UFrameTrace,
   UWebcam,
   UWebSDK, UMenuBackground;
 
@@ -671,6 +672,9 @@ var
   DisplaySec:             integer;
   CurLyricsTime:          real;
   VideoFrameTime:         Extended;
+  DiagStarted:            UInt64;
+  DiagGetFrameMs, DiagActionValue: double;
+  DiagActionId:           integer;
   ScorePlayerIndex:       integer;
   VoiceIndex:             integer;
   medley_end:             boolean;
@@ -887,14 +891,23 @@ begin
         // LyricsState.GetCurrentTime()
         VideoFrameTime := CurrentSong.VideoGAP;
       end;
+      // Fork-only diagnostics, see UFrameTrace.
+      DiagStarted := SDL_GetPerformanceCounter;
       try
         ScreenSing.fCurrentVideo.GetFrame(VideoFrameTime);
       except
       end;
+      DiagGetFrameMs := (SDL_GetPerformanceCounter - DiagStarted) * 1000 / SDL_GetPerformanceFrequency;
     end;
 
     ScreenSing.fCurrentVideo.SetScreen(ScreenAct);
     ScreenSing.fCurrentVideo.Draw;
+    if FrameTraceEnabled and (ScreenAct = 1) and ScreenSing.ShowFinish then
+    begin
+      FrameTraceVideo(VideoFrameTime, VideoFrameTime - CurrentSong.VideoGAP, DiagGetFrameMs, ScreenSing.Paused);
+      while FrameTraceNextAction(DiagActionId, DiagActionValue) do
+        ScreenSing.DiagAction(DiagActionId, DiagActionValue);
+    end;
   end;
 
   ScoreMode := TSingInfoBarMode(EnsureRange(Ini.SingScores, 0, Ord(High(TSingInfoBarMode))));

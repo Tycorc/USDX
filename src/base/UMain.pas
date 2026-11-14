@@ -115,6 +115,7 @@ uses
   ULuaScreenSing,
   UTime,
   UFramePacer,
+  UFrameTrace,
   UWebcam,
   ULibraryLockdown,
   ULockdownUI, UDuplicateSongUI, ULockdownLaunch, USong, UScreenContinuousPlayback;
@@ -981,7 +982,9 @@ begin
          (SDL_GetCurrentDisplayMode(SDL_GetWindowDisplayIndex(Screen), @DisplayMode) = 0) and
          (DisplayMode.refresh_rate > 0) then
         FrameLimit := Min(FrameLimit, DisplayMode.refresh_rate);
+      FrameTraceStartFrame;
       FramePacer.WaitForFrame(FrameLimit);
+      FrameTraceWaited;
       Log.FlushPending;
 
       // keyboard/mouse/joystick events
@@ -993,8 +996,10 @@ begin
 
       // display
       Done := not Display.Draw;
+      FrameTraceDrawn;
       LogAudioInputDiagnostics;
       Renderer.SwapBuffers;
+      FrameTraceSwapped;
 
       CountSkipTime;
       J:=1;
